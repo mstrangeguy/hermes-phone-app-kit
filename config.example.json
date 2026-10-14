@@ -1,0 +1,10 @@
+{
+  "port": 8643,
+  "upstream_port": 8642,
+  "hermes_home": "~/.hermes",
+  "alerts": {
+    "channel": "telegram",
+    "chat_id": "",
+    "url": "https://your-mac.your-tailnet.ts.net:8443/"
+  }
+}

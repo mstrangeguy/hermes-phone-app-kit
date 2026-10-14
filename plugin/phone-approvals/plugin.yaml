@@ -1,0 +1,7 @@
+name: phone-approvals
+version: "0.1.0"
+description: Lets the phone chat page answer approval prompts raised in this Hermes process (Allow once or Deny only).
+author: Michael Strange
+provides_hooks:
+  - pre_approval_request
+  - post_approval_response

@@ -1,0 +1,11 @@
+# Per-install files: never commit these.
+config.json
+allowed-logins.txt
+faceid.json
+faceid-setup.json
+update-check.json
+alerts.json
+serve.log
+serve.pid
+__pycache__/
+*.tmp

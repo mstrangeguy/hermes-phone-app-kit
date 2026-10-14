@@ -1,0 +1,123 @@
+# Hermes phone app
+
+A phone chat app for your own Hermes agent. It uses the same sessions as the Hermes desktop app, CLI and Telegram. You can read and continue any session, watch a reply's tool steps live, guide a running reply, stop it, answer approval prompts with Face ID, and get an alert when Hermes needs you or finishes.
+
+It runs on the Mac that runs Hermes and is reachable only over your Tailscale tailnet. It is a web page added to the iPhone Home Screen. There is no App Store app and no cloud service.
+
+## What you need
+
+- macOS, with Hermes installed in `~/.hermes` and its gateway running.
+- Tailscale on the Mac and the iPhone, signed in to the same tailnet, with HTTPS certificates enabled for the tailnet (admin console → DNS → HTTPS Certificates).
+- A Telegram bot already set up in Hermes if you want alerts on Telegram. Home Assistant also works, or no alerts.
+
+## Install
+
+```bash
+git clone https://github.com/<owner>/hermes-phone-app.git ~/.hermes/phone-chat
+cd ~/.hermes/phone-chat
+./install.sh
+```
+
+Do not clone into iCloud Drive, Dropbox or OneDrive. Sync damages git folders, and the installer refuses those paths.
+
+The installer asks before each change. In order, it:
+
+1. Finds Hermes and its Python, and checks that the Python has `cryptography` (needed for Face ID).
+2. Checks the Hermes API server. If it is off, it offers to add `API_SERVER_ENABLED=true` and a random `API_SERVER_KEY` to `~/.hermes/.env`. The key is never shown. The gateway must restart to pick that up; the installer asks, because a restart ends any reply running at that moment, including on Telegram.
+3. Reads your Tailscale login and writes it to `allowed-logins.txt`. Every request to the app must come from that login.
+4. Writes `config.json` and asks where alerts go: Telegram (through the bot Hermes already uses), Home Assistant, or none. It can send one test alert.
+5. Installs a LaunchAgent, `com.hermes.phone-chat`, that keeps the proxy running on `127.0.0.1:8643`. It checks that the proxy answers and that it refuses a request without your login.
+6. Publishes the proxy on your tailnet at `https://<this-mac>.<tailnet>.ts.net:8443/` with Tailscale Serve, tailnet only. It never uses Funnel. It stops if port 8443 is already used, and stops if adding it changed any other Serve or Funnel entry.
+7. Sets up Face ID and prints a setup code, valid for 10 minutes.
+8. Tests the optional phone-approvals plugin against your Hermes version and offers to install it only if the test passes.
+9. Offers an hourly check that re-runs the tests after a Hermes update and alerts you once if something broke.
+
+## On the iPhone
+
+1. With Tailscale connected, open the URL the installer printed in Safari.
+2. Share → Add to Home Screen. Open the app from the new icon.
+3. Enter the setup code, then tap Set up Face ID. From then on the app unlocks with Face ID, and allowing a command needs Face ID again.
+
+If the code expired: `cd ~/.hermes/phone-chat && ~/.hermes/hermes-agent/venv/bin/python -I serve.py --setup-code`
+
+If the page does not load with iCloud Private Relay on, add this to the tailnet policy file (admin console → Access controls → JSON editor), as its own section beside `acls`. Then turn Tailscale off and on again on the phone.
+
+```json
+"nodeAttrs": [
+  { "target": ["autogroup:member"], "attr": ["disable-split-dns-when-no-custom-resolvers"] }
+]
+```
+
+## Phone approvals (optional)
+
+Without the plugin, the phone answers approval prompts for replies it started. With it, the phone also answers prompts raised in the desktop app or on Telegram. Only Allow once and Deny are offered.
+
+After the installer links the plugin:
+
+1. Let any running reply finish, then quit the desktop app (Cmd-Q).
+2. `hermes plugins enable phone-approvals`
+3. `hermes gateway restart`, so Telegram prompts are covered too.
+4. Reopen the desktop app.
+
+The plugin uses Hermes internals (`tools.approval.list_gateway_approvals` and `resolve_gateway_approval`). A Hermes update can change them. If it does, a prompt answered from the phone is not applied and the prompt times out to Deny, as it would if nobody answered. The hourly check catches this.
+
+## Settings: `config.json`
+
+Written by the installer. Edit it by hand to change alerts; the alerts block is re-read every few seconds, so no restart is needed.
+
+| Key | Meaning |
+|---|---|
+| `port` | Local proxy port. Default 8643. Needs a proxy restart. |
+| `upstream_port` | Hermes API port. Default 8642. |
+| `hermes_home` | Hermes home. Default `~/.hermes`. |
+| `alerts.channel` | `telegram`, `homeassistant` or `none`. |
+| `alerts.chat_id` | Telegram chat id. Empty means your Hermes home channel (`TELEGRAM_HOME_CHANNEL`, set with `/sethome`). |
+| `alerts.notify` | Home Assistant notify service, e.g. `mobile_app_my_iphone`. Uses `HASS_URL` and `HASS_TOKEN` from `.env`. |
+| `alerts.url` | Link opened from the alert. |
+
+Alert text is always generic, for example "Hermes is waiting for your approval." No commands, file names or chat text are sent through Telegram or Apple.
+
+## Security
+
+This app is a remote control for an agent that can run commands on your Mac. Read this before installing.
+
+- The proxy listens on `127.0.0.1` only. The only way in from outside is Tailscale Serve on your tailnet. There is no public URL.
+- Every request must carry an allowed Tailscale login, which Tailscale Serve sets and clients cannot forge. Devices shared into your tailnet, or tagged devices, are refused.
+- With Face ID enrolled, the phone never holds the Hermes API key. The Mac adds it to each request. Face ID unlocks a session that ends after 30 minutes idle or 12 hours. Allow once needs a fresh Face ID check tied to that one prompt. Deny never needs it.
+- The page loads nothing from other sites. Its content policy blocks inline scripts, and model output is cleaned before display.
+- If this Mac is managed by an employer, check with them before opening a remote path into it.
+
+## Everyday commands
+
+```bash
+cd ~/.hermes/phone-chat
+launchctl kickstart -k gui/$(id -u)/com.hermes.phone-chat     # restart the proxy
+tail -f serve.log                                              # proxy log (no keys or logins are logged)
+~/.hermes/hermes-agent/venv/bin/python -I serve.py --notify "test"   # send a test alert
+scripts/update-check.sh --force                               # run every test now
+git pull && launchctl kickstart -k gui/$(id -u)/com.hermes.phone-chat   # update
+```
+
+Run a single test suite (each one needs an empty scratch folder):
+
+```bash
+~/.hermes/hermes-agent/venv/bin/python -I tests/plugin_test.py "$PWD" "$(mktemp -d)"
+```
+
+## Uninstall
+
+`./uninstall.sh` removes the LaunchAgent, the Tailscale port (only if it points at this proxy), the plugin link, and the cron job. It leaves Hermes, `.env` and this folder alone. On the iPhone, delete the Home Screen icon and, in Settings → Passwords, the passkey for this Mac.
+
+## Files
+
+| Path | What |
+|---|---|
+| `serve.py` | The proxy: serves the page, checks the login and Face ID, forwards to Hermes, sends alerts. |
+| `faceid.py` | Passkey checks. |
+| `page/` | The app: HTML, JS, CSS, icon, plus local copies of marked and DOMPurify. |
+| `plugin/phone-approvals/` | Optional Hermes plugin. |
+| `scripts/` | Installer helpers and the update check. |
+| `tests/` | Offline tests. None of them contacts a real phone, bot or Home Assistant. |
+| `SKILL.md` | Instructions for your Hermes agent to maintain this app. |
+
+Third-party code: marked (MIT) and DOMPurify (Apache-2.0 / MPL-2.0), licences in `page/vendor/`. The icon is Hermes's own (MIT), licence in `page/icon-LICENSE`.
