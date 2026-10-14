@@ -6,31 +6,36 @@ It runs on the Mac that runs Hermes and is reachable only over your Tailscale ta
 
 ## What you need
 
-- macOS, with Hermes installed in `~/.hermes` and its gateway running.
+- macOS, with Hermes installed in `~/.hermes` and its gateway running. Tested on Hermes `v2026.9.24` and `v0.22.0`.
 - Tailscale on the Mac and the iPhone, signed in to the same tailnet, with HTTPS certificates enabled for the tailnet (admin console → DNS → HTTPS Certificates).
 - A Telegram bot already set up in Hermes if you want alerts on Telegram. Home Assistant also works, or no alerts.
 
 ## Install
 
 ```bash
-git clone https://github.com/<owner>/hermes-phone-app.git ~/.hermes/phone-chat
+git clone https://github.com/mstrangeguy/hermes-phone-app-kit.git ~/.hermes/phone-chat
 cd ~/.hermes/phone-chat
 ./install.sh
 ```
+
+The repo is private: accept the GitHub invite first, and be signed in to GitHub on this Mac (`gh auth login`, or a browser prompt on the first clone).
+
+Run `./install.sh` yourself, in a Terminal window on the Mac. It asks questions only you should answer, and it prints a Face ID setup code for your phone. Your Hermes can clone the repo, explain a question, or fix a failure, but if Hermes runs the installer itself it cannot answer the questions and takes every default.
 
 Do not clone into iCloud Drive, Dropbox or OneDrive. Sync damages git folders, and the installer refuses those paths.
 
 The installer asks before each change. In order, it:
 
-1. Finds Hermes and its Python, and checks that the Python has `cryptography` (needed for Face ID).
-2. Checks the Hermes API server. If it is off, it offers to add `API_SERVER_ENABLED=true` and a random `API_SERVER_KEY` to `~/.hermes/.env`. The key is never shown. The gateway must restart to pick that up; the installer asks, because a restart ends any reply running at that moment, including on Telegram.
+1. Finds Hermes and its Python, and checks that the Python has `cryptography` (needed for Face ID). Older Hermes keeps it in `hermes-agent/venv`; current Hermes manages it itself. `scripts/py` finds either.
+2. Checks the Hermes API server, which runs when `API_SERVER_KEY` in `~/.hermes/.env` is set (16+ characters). If it is not, it offers to add a random key and `API_SERVER_ENABLED=true`. The key is never shown. The gateway must restart to pick that up; the installer asks, because a restart ends any reply running at that moment, including on Telegram.
 3. Reads your Tailscale login and writes it to `allowed-logins.txt`. Every request to the app must come from that login.
-4. Writes `config.json` and asks where alerts go: Telegram (through the bot Hermes already uses), Home Assistant, or none. It can send one test alert.
+4. Writes `config.json` and asks where alerts go: Telegram (through the bot Hermes already uses), Home Assistant, or none. For Telegram it uses your Hermes home channel (`/sethome`), or else your private chat with the bot. It can send one test alert.
 5. Installs a LaunchAgent, `com.hermes.phone-chat`, that keeps the proxy running on `127.0.0.1:8643`. It checks that the proxy answers and that it refuses a request without your login.
 6. Publishes the proxy on your tailnet at `https://<this-mac>.<tailnet>.ts.net:8443/` with Tailscale Serve, tailnet only. It never uses Funnel. It stops if port 8443 is already used, and stops if adding it changed any other Serve or Funnel entry.
 7. Sets up Face ID and prints a setup code, valid for 10 minutes.
 8. Tests the optional phone-approvals plugin against your Hermes version and offers to install it only if the test passes.
-9. Offers an hourly check that re-runs the tests after a Hermes update and alerts you once if something broke.
+9. Links `skill/` into `~/.hermes/skills`, so your Hermes knows how to look after the app.
+10. Offers an hourly check that re-runs the tests after a Hermes update and alerts you once if something broke.
 
 ## On the iPhone
 
@@ -38,7 +43,7 @@ The installer asks before each change. In order, it:
 2. Share → Add to Home Screen. Open the app from the new icon.
 3. Enter the setup code, then tap Set up Face ID. From then on the app unlocks with Face ID, and allowing a command needs Face ID again.
 
-If the code expired: `cd ~/.hermes/phone-chat && ~/.hermes/hermes-agent/venv/bin/python -I serve.py --setup-code`
+If the code expired: `cd ~/.hermes/phone-chat && scripts/py -I serve.py --setup-code`
 
 If the page does not load with iCloud Private Relay on, add this to the tailnet policy file (admin console → Access controls → JSON editor), as its own section beside `acls`. Then turn Tailscale off and on again on the phone.
 
@@ -50,7 +55,7 @@ If the page does not load with iCloud Private Relay on, add this to the tailnet 
 
 ## Phone approvals (optional)
 
-Without the plugin, the phone answers approval prompts for replies it started. With it, the phone also answers prompts raised in the desktop app or on Telegram. Only Allow once and Deny are offered.
+Without the plugin, the phone answers approval prompts for replies it started. With it, the phone also answers prompts raised in the desktop app or on Telegram. A prompt in a terminal `hermes` chat is answered only in that terminal. Only Allow once and Deny are offered.
 
 After the installer links the plugin:
 
@@ -93,7 +98,7 @@ This app is a remote control for an agent that can run commands on your Mac. Rea
 cd ~/.hermes/phone-chat
 launchctl kickstart -k gui/$(id -u)/com.hermes.phone-chat     # restart the proxy
 tail -f serve.log                                              # proxy log (no keys or logins are logged)
-~/.hermes/hermes-agent/venv/bin/python -I serve.py --notify "test"   # send a test alert
+scripts/py -I serve.py --notify "test"                        # send a test alert
 scripts/update-check.sh --force                               # run every test now
 git pull && launchctl kickstart -k gui/$(id -u)/com.hermes.phone-chat   # update
 ```
@@ -101,12 +106,12 @@ git pull && launchctl kickstart -k gui/$(id -u)/com.hermes.phone-chat   # update
 Run a single test suite (each one needs an empty scratch folder):
 
 ```bash
-~/.hermes/hermes-agent/venv/bin/python -I tests/plugin_test.py "$PWD" "$(mktemp -d)"
+scripts/py -I tests/plugin_test.py "$PWD" "$(mktemp -d)"
 ```
 
 ## Uninstall
 
-`./uninstall.sh` removes the LaunchAgent, the Tailscale port (only if it points at this proxy), the plugin link, and the cron job. It leaves Hermes, `.env` and this folder alone. On the iPhone, delete the Home Screen icon and, in Settings → Passwords, the passkey for this Mac.
+`./uninstall.sh` removes the LaunchAgent, the Tailscale port (only if it points at this proxy), the plugin and skill links, and the cron job. It leaves Hermes, `.env` and this folder alone. On the iPhone, delete the Home Screen icon and, in Settings → Passwords, the passkey for this Mac.
 
 ## Files
 
@@ -116,8 +121,8 @@ Run a single test suite (each one needs an empty scratch folder):
 | `faceid.py` | Passkey checks. |
 | `page/` | The app: HTML, JS, CSS, icon, plus local copies of marked and DOMPurify. |
 | `plugin/phone-approvals/` | Optional Hermes plugin. |
-| `scripts/` | Installer helpers and the update check. |
+| `scripts/` | `py` (finds Hermes's Python), installer helpers, the update check. |
 | `tests/` | Offline tests. None of them contacts a real phone, bot or Home Assistant. |
-| `SKILL.md` | Instructions for your Hermes agent to maintain this app. |
+| `skill/SKILL.md` | Instructions for your Hermes agent to maintain this app. |
 
 Third-party code: marked (MIT) and DOMPurify (Apache-2.0 / MPL-2.0), licences in `page/vendor/`. The icon is Hermes's own (MIT), licence in `page/icon-LICENSE`.

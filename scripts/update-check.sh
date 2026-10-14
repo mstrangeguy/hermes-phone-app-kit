@@ -11,12 +11,11 @@ set -uo pipefail
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
-HERMES_HOME="$(/usr/bin/python3 -I -c 'import json,os,sys
-try: print(os.path.expanduser(json.load(open(sys.argv[1])).get("hermes_home") or "~/.hermes"))
-except Exception: print(os.path.expanduser("~/.hermes"))' "$ROOT/config.json" 2>/dev/null)"
-HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+HERMES_HOME="$(/usr/bin/plutil -extract hermes_home raw -o - "$ROOT/config.json" 2>/dev/null || true)"
+HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"; HERMES_HOME="${HERMES_HOME/#\~/$HOME}"
 HERMES_AGENT="${HERMES_AGENT_DIR:-$HERMES_HOME/hermes-agent}"
-PY="$HERMES_AGENT/venv/bin/python"
+# Looked up every run: a Hermes update can move its Python.
+PY="$(HERMES_HOME="$HERMES_HOME" HERMES_AGENT_DIR="$HERMES_AGENT" /bin/bash "$ROOT/scripts/py" --which 2>/dev/null)" || PY=""
 STATE="$ROOT/update-check.json"
 
 force=0; simulate=0
@@ -33,7 +32,8 @@ pyver=$("$PY" -I -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>/de
 crypto=$("$PY" -I -c 'import cryptography; print(cryptography.__version__)' 2>/dev/null || echo missing)
 fp="hermes=$commit python=$pyver cryptography=$crypto"
 
-read_state() { /usr/bin/python3 -I -c 'import json,sys
+SPY="${PY:-/usr/bin/python3}"   # state file only; plain stdlib
+read_state() { "$SPY" -I -c 'import json,sys
 try: print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))
 except Exception: print("")' "$STATE" "$1"; }
 last_pass=$(read_state passed); last_fail=$(read_state failed)
@@ -41,7 +41,7 @@ last_pass=$(read_state passed); last_fail=$(read_state failed)
 [ "$force" = 0 ] && [ "$fp" = "$last_pass" ] && exit 0
 
 write_state() {  # passed failed
-  /usr/bin/python3 -I -c 'import json,os,sys,time
+  "$SPY" -I -c 'import json,os,sys,time
 path, passed, failed = sys.argv[1:4]
 fd = os.open(path + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
 with os.fdopen(fd, "w") as f:
@@ -50,7 +50,7 @@ os.replace(path + ".tmp", path)' "$STATE" "$1" "$2"
 }
 
 alert() {  # message: through serve.py, so it uses whatever channel config.json names
-  if [ -x "$PY" ]; then
+  if [ -n "$PY" ] && [ -x "$PY" ]; then
     (cd "$ROOT" && "$PY" -I serve.py --notify "$1") || true
   else
     echo "cannot alert: Hermes Python missing"
@@ -74,8 +74,8 @@ run_test() {  # name
   fi
 }
 
-if [ ! -x "$PY" ]; then
-  ok=0; results=" Hermes venv Python missing;"
+if [ -z "$PY" ] || [ ! -x "$PY" ]; then
+  ok=0; results=" Hermes Python not found;"
 else
   for t in plugin faceid approvals alerts busy; do run_test "$t"; done
 fi

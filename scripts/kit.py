@@ -41,6 +41,17 @@ def env_has(path, name):
     return 0 if read_env(path).get(name) else 1
 
 
+def key_usable(value):
+    """Hermes starts the API server only with a key of 16+ characters that is
+    not a placeholder (gateway/config.py _has_usable_api_server_key)."""
+    value = (value or "").strip()
+    return len(value) >= 16 and value.lower() not in {"changeme", "your-key-here", "xxx", "placeholder"}
+
+
+def api_key_ok(path):
+    return 0 if key_usable(read_env(path).get("API_SERVER_KEY")) else 1
+
+
 def env_get(path, name):
     if name not in NON_SECRET:
         print("refusing to print %s" % name, file=sys.stderr)
@@ -59,7 +70,7 @@ def env_add_api(path):
         lines, mode = [], 0o600
     current = read_env(path)
     wanted = {"API_SERVER_ENABLED": "true"}
-    if not current.get("API_SERVER_KEY"):
+    if not key_usable(current.get("API_SERVER_KEY")):
         wanted["API_SERVER_KEY"] = secrets.token_urlsafe(32)
     out, done = [], set()
     for line in lines:
@@ -82,6 +93,16 @@ def env_add_api(path):
     os.replace(tmp, path)
     print("API server enabled" + (" and key created" if "API_SERVER_KEY" in wanted else ""))
     return 0
+
+
+def telegram_dm(path):
+    """Print the one numeric id in TELEGRAM_ALLOWED_USERS, if there is exactly one.
+    In a private chat with the bot, Telegram's chat id is that user's id."""
+    ids = [part.strip() for part in (read_env(path).get("TELEGRAM_ALLOWED_USERS") or "").split(",") if part.strip()]
+    if len(ids) == 1 and re.match(r"^[0-9]{3,20}$", ids[0]):
+        print(ids[0])
+        return 0
+    return 1
 
 
 def ts_self(status_path):
@@ -163,7 +184,7 @@ def save(path, data):
     tmp = path + ".tmp"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        json.dump(data, handle, indent=2)
+        json.dump(data, handle, indent=2, ensure_ascii=False)
         handle.write("\n")
     os.replace(tmp, path)
 
@@ -212,11 +233,14 @@ def allow_login(path, login):
     return 0
 
 
-def plist(out, label, python, root):
+def plist(out, label, root, agent_dir=""):
+    """scripts/py finds Hermes's Python at every start, so a Hermes update
+    that moves it does not leave the service pointing at a deleted file."""
     log = os.path.join(root, "serve.log")
     data = {
         "Label": label,
-        "ProgramArguments": [python, os.path.join(root, "serve.py"), "--foreground"],
+        "ProgramArguments": ["/bin/bash", os.path.join(root, "scripts", "py"), "-I",
+                             os.path.join(root, "serve.py"), "--foreground"],
         "RunAtLoad": True,
         "KeepAlive": True,
         "ThrottleInterval": 30,
@@ -224,6 +248,8 @@ def plist(out, label, python, root):
         "StandardOutPath": log,
         "StandardErrorPath": log,
     }
+    if agent_dir:
+        data["EnvironmentVariables"] = {"HERMES_AGENT_DIR": agent_dir}
     with open(out, "wb") as handle:
         plistlib.dump(data, handle)
     return 0
@@ -252,7 +278,8 @@ def cron_id(jobs_path, name):
 
 
 COMMANDS = {
-    "env-has": env_has, "env-get": env_get, "env-add-api": env_add_api,
+    "env-has": env_has, "env-get": env_get, "env-add-api": env_add_api, "api-key-ok": api_key_ok,
+    "telegram-dm": telegram_dm,
     "ts-self": ts_self, "serve-state": serve_state, "serve-kept": serve_kept,
     "config-base": config_base, "config-get": config_get, "config-alerts": config_alerts,
     "allow-login": allow_login, "plist": plist, "faceid-state": faceid_state, "cron-id": cron_id,

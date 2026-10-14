@@ -55,15 +55,12 @@ ok "$ROOT"
 # --- 2. Hermes and its Python ------------------------------------------------------
 say "Finding Hermes"
 [ -d "$HERMES_HOME" ] || die "no Hermes home at $HERMES_HOME. Set HERMES_HOME if it lives elsewhere."
-PY="$HERMES_AGENT/venv/bin/python"
-if [ ! -x "$PY" ]; then
-  # Fall back to the Python the `hermes` command runs on.
-  if command -v hermes >/dev/null 2>&1; then
-    PY="$(head -1 "$(command -v hermes)" | sed -e 's/^#!//' -e 's/ .*//')"
-    HERMES_AGENT="$(cd "$(dirname "$PY")/../.." 2>/dev/null && pwd -P)"
-  fi
-fi
-[ -x "$PY" ] || die "could not find Hermes's Python. Set HERMES_AGENT_DIR to the hermes-agent checkout."
+[ -d "$HERMES_AGENT" ] || die "no Hermes checkout at $HERMES_AGENT. Set HERMES_AGENT_DIR to it."
+# scripts/py knows both layouts: <checkout>/venv (older Hermes) and the
+# dependency environment Hermes's package manager selects (current Hermes).
+PY="$(HERMES_AGENT_DIR="$HERMES_AGENT" /bin/bash "$ROOT/scripts/py" --which 2>/dev/null)" || PY=""
+[ -n "$PY" ] && [ -x "$PY" ] || die "could not find Hermes's Python. Set HERMES_AGENT_DIR to the hermes-agent
+checkout, or PHONE_APP_PYTHON to its interpreter, and re-run."
 "$PY" -I -c 'import cryptography' 2>/dev/null \
   || die "Hermes's Python ($PY) has no 'cryptography' package, which Face ID needs. Run 'hermes update' and try again."
 ok "Hermes home $HERMES_HOME"
@@ -73,9 +70,9 @@ ok "Hermes version $HVER"
 
 # --- 3. Hermes API server ---------------------------------------------------------
 say "Checking the Hermes API server"
+# Hermes starts its API server whenever API_SERVER_KEY is usable (16+ characters).
 api_on=1
-kit env-has "$ENV_FILE" API_SERVER_KEY || api_on=0
-[ "$(kit env-get "$ENV_FILE" API_SERVER_ENABLED 2>/dev/null | tr 'A-Z' 'a-z')" = true ] || api_on=0
+kit api-key-ok "$ENV_FILE" || api_on=0
 API_PORT="$(kit env-get "$ENV_FILE" API_SERVER_PORT 2>/dev/null)"; API_PORT="${API_PORT:-8642}"
 API_HOST="$(kit env-get "$ENV_FILE" API_SERVER_HOST 2>/dev/null)"
 if [ -n "$API_HOST" ] && [ "$API_HOST" != 127.0.0.1 ] && [ "$API_HOST" != localhost ]; then
@@ -83,7 +80,7 @@ if [ -n "$API_HOST" ] && [ "$API_HOST" != 127.0.0.1 ] && [ "$API_HOST" != localh
 fi
 restart_needed=0
 if [ "$api_on" = 0 ]; then
-  echo "   The phone app talks to Hermes through its API server, which is off or has no key."
+  echo "   The phone app talks to Hermes through its API server, which needs a key of 16+ characters."
   echo "   This adds API_SERVER_ENABLED=true and a new random API_SERVER_KEY to $ENV_FILE."
   echo "   The key is never shown. Other lines in .env are kept."
   ask "Turn on the API server?" y || die "the API server is required."
@@ -155,9 +152,18 @@ else
         echo "   Telegram alerts go to your Hermes home channel (/sethome) unless you give a chat id."
         read -r -p "   Chat id [home channel] " chat || chat=""
       else
-        echo "   Your Telegram user id: message the bot, then see TELEGRAM_ALLOWED_USERS in .env,"
-        echo "   or send /sethome to the bot in your DM and re-run this installer."
-        read -r -p "   Chat id " chat || chat=""
+        # In a private chat with the bot, the chat id is the user's own Telegram id.
+        dm="$(kit telegram-dm "$ENV_FILE" 2>/dev/null)" || dm=""
+        if [ -n "$dm" ]; then
+          echo "   No home channel is set. Your private chat with the bot is the one Telegram id"
+          echo "   in TELEGRAM_ALLOWED_USERS ($dm)."
+          read -r -p "   Chat id [$dm] " chat || chat=""
+          chat="${chat:-$dm}"
+        else
+          echo "   No home channel is set. Send /sethome to the bot in your private chat and re-run,"
+          echo "   or enter your numeric Telegram user id (from @userinfobot)."
+          read -r -p "   Chat id " chat || chat=""
+        fi
         [ -n "$chat" ] || die "Telegram alerts need a chat id."
       fi
       if [ -n "$chat" ]; then
@@ -175,7 +181,8 @@ else
   chan="$(kit config-get "$CONFIG" alerts.channel)"
   ok "alerts: $chan"
   if [ "$chan" != none ] && ask "Send one test alert now?" y; then
-    (cd "$ROOT" && "$PY" -I serve.py --notify "Hermes phone app: test alert.") || warn "test alert failed"
+    (cd "$ROOT" && "$PY" -I serve.py --notify "Hermes phone app: test alert.") \
+      && echo "   Sent. Check that it arrived on the phone." || warn "test alert failed; see $ROOT/serve.log"
   fi
 fi
 
@@ -186,7 +193,7 @@ if [ -n "$listener" ] && ! launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | g
   die "port $PORT is already used by another program (pid $listener). Set PHONE_APP_PORT to a free port."
 fi
 mkdir -p "$HOME/Library/LaunchAgents"
-kit plist "$WORK/agent.plist" "$LABEL" "$PY" "$ROOT"
+kit plist "$WORK/agent.plist" "$LABEL" "$ROOT" "$HERMES_AGENT"
 if launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
   launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
   sleep 1
@@ -280,7 +287,20 @@ else
   grep -E '^FAIL|Error' "$WORK/plugin.out" | head -5 | sed 's/^/      /'
 fi
 
-# --- 11. Update check (optional) ------------------------------------------------------------
+# --- 11. Skill for this Hermes ----------------------------------------------------------
+say "Hermes skill (so your Hermes knows how to look after the app)"
+skill_link="$HERMES_HOME/skills/hermes-phone-app"
+if [ -L "$skill_link" ] && [ "$(readlink "$skill_link")" = "$ROOT/skill" ]; then
+  ok "already linked"
+elif [ -e "$skill_link" ]; then
+  warn "$skill_link exists and is not this copy's skill; left alone"
+elif ask "Link skill/ into $HERMES_HOME/skills?" y; then
+  mkdir -p "$HERMES_HOME/skills"
+  ln -s "$ROOT/skill" "$skill_link"
+  ok "linked; new Hermes sessions will see it"
+fi
+
+# --- 12. Update check (optional) ------------------------------------------------------------
 say "Hourly update check (optional)"
 echo "   After 'hermes update', re-runs the tests and sends one alert if something broke."
 wrapper="$HERMES_HOME/scripts/phone_app_update_check.sh"
@@ -307,7 +327,7 @@ if [ -n "${CODE_LINE:-}" ]; then
   cat <<EOF
 
    Face ID: the app asks for a setup code. $CODE_LINE
-   New code later: cd "$ROOT" && "$PY" -I serve.py --setup-code
+   It is valid for 10 minutes. New code later: cd "$ROOT" && scripts/py -I serve.py --setup-code
 EOF
 fi
 if [ "${PLUGIN_STEP:-0}" = 1 ]; then

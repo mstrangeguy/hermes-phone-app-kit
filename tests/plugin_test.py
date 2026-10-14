@@ -1,7 +1,7 @@
 """Offline test of plugin/phone-approvals against the real Hermes approval code.
 
 Usage (Hermes venv python, from any directory):
-  ~/.hermes/hermes-agent/venv/bin/python -I tests/plugin_test.py <repo-dir> <empty-scratch-dir>
+  scripts/py -I tests/plugin_test.py <repo-dir> <empty-scratch-dir>
 
 Builds a throwaway HERMES_HOME with the plugin enabled, raises real gateway
 approvals on threads, and answers them through decision files the way serve.py

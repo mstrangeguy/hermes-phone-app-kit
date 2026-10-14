@@ -1,0 +1,52 @@
+#!/bin/bash
+# Run Hermes's own Python (the one with Hermes's dependencies, including
+# cryptography) with the given arguments:
+#
+#   scripts/py -I serve.py --notify "test"
+#   scripts/py --which          print its path
+#
+# Looked up on every call, because a Hermes update can move it:
+#   1. PHONE_APP_PYTHON, if set.
+#   2. <hermes-agent>/venv or .venv  (older Hermes installs).
+#   3. Current Hermes, whose dependencies are managed by its `pm`: ask the
+#      `hermes` launcher for its store Python, then ask Hermes's pm which
+#      dependency environment is selected. The same environment Hermes cron
+#      uses for scripts.
+set -uo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
+
+home="${HERMES_HOME:-}"
+if [ -z "$home" ] && [ -f "$ROOT/config.json" ]; then
+  home="$(/usr/bin/plutil -extract hermes_home raw -o - "$ROOT/config.json" 2>/dev/null || true)"
+fi
+home="${home:-$HOME/.hermes}"
+home="${home/#\~/$HOME}"
+AGENT="${HERMES_AGENT_DIR:-$home/hermes-agent}"
+
+find_py() {
+  if [ -n "${PHONE_APP_PYTHON:-}" ]; then echo "$PHONE_APP_PYTHON"; return 0; fi
+  local c
+  for c in "$AGENT/venv/bin/python" "$AGENT/.venv/bin/python"; do
+    [ -x "$c" ] && { echo "$c"; return 0; }
+  done
+  local launcher store
+  launcher="$(command -v hermes 2>/dev/null || true)"
+  [ -n "$launcher" ] || { [ -x "$HOME/.local/bin/hermes" ] && launcher="$HOME/.local/bin/hermes"; }
+  [ -n "$launcher" ] && [ -f "$AGENT/pm/environments.py" ] || return 1
+  store="$(HERMES_HOME="$home" "$launcher" --print-runtime-command 2>/dev/null \
+           | /usr/bin/plutil -extract 0 raw -o - - 2>/dev/null)" || return 1
+  [ -x "$store" ] || return 1
+  HERMES_HOME="$home" "$store" -I -c 'import pathlib, sys
+root = sys.argv[1]
+sys.path.insert(0, root)
+from pm.environments import project_python
+print(project_python(pathlib.Path(root)))' "$AGENT" 2>/dev/null
+}
+
+PY="$(find_py)" || PY=""
+if [ -z "$PY" ] || [ ! -x "$PY" ]; then
+  echo "scripts/py: cannot find Hermes's Python under $AGENT. Set HERMES_AGENT_DIR to the hermes-agent checkout, or PHONE_APP_PYTHON to the interpreter." >&2
+  exit 127
+fi
+if [ "${1:-}" = --which ]; then echo "$PY"; exit 0; fi
+exec "$PY" "$@"

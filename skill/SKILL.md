@@ -11,9 +11,13 @@ metadata:
 
 # Hermes phone app
 
-A phone chat page for this Hermes, served by a small proxy (`serve.py`) on `127.0.0.1:8643` and published tailnet-only by Tailscale Serve on `:8443`. The checkout is normally `~/.hermes/phone-chat`. `README.md` there is the user guide; this file is the maintenance rules.
+A phone chat page for this Hermes, served by a small proxy (`serve.py`) on `127.0.0.1:8643` and published tailnet-only by Tailscale Serve on `:8443`. The checkout is normally `~/.hermes/phone-chat` (this skill is linked from its `skill/` folder). `README.md` there is the user guide; this file is the maintenance rules.
 
-To install it for the user, read `README.md` and run `./install.sh` in a terminal the user can answer. The installer asks before every change. Do not answer its questions on the user's behalf.
+## Installing
+
+The user runs `./install.sh` himself in a Terminal window on the Mac. You may clone the repo (`git clone https://github.com/mstrangeguy/hermes-phone-app-kit.git ~/.hermes/phone-chat`; it is private, so the user must have accepted the invite and be signed in to GitHub), then tell him the command. Do not run `install.sh` from your own terminal tool: it has no keyboard, so every question silently takes its default and the user agrees to nothing. Do not answer its questions for him. Afterwards you can explain a question, read `serve.log`, or fix a failed step.
+
+Run Python for this app with `scripts/py`, never a hardcoded interpreter path. It finds Hermes's own Python on older installs (`hermes-agent/venv`) and on current ones (managed by Hermes's package manager), which a Hermes update can move.
 
 ## Rules
 
@@ -32,7 +36,7 @@ Run every suite with Hermes's venv Python, each with its own empty scratch folde
 
 ```bash
 for t in plugin faceid approvals alerts busy; do
-  ~/.hermes/hermes-agent/venv/bin/python -I tests/${t}_test.py "$PWD" "$(mktemp -d)" | tail -1
+  scripts/py -I tests/${t}_test.py "$PWD" "$(mktemp -d)" | tail -1
 done
 ```
 
@@ -47,4 +51,6 @@ done
 - **Page does not load on the phone with iCloud Private Relay on:** the tailnet policy is missing the `disable-split-dns-when-no-custom-resolvers` node attribute (see README). This Mac cannot open its own tailnet name, so a local test proves nothing; the phone is the test.
 - **A phone message waits forever:** another reply is running in that session (`session_turn_leases` in `state.db`), or it is paused on an approval. It continues when that turn ends.
 - **"alert failed: HTTP 400/401/403"** in `serve.log`: wrong chat id, the bot is blocked by the user, or the token is wrong. Telegram bots can only message chats that messaged them first.
+- **The proxy will not start after a Hermes update** (`serve.log` says it cannot find Hermes's Python): run `scripts/py --which`. If it fails, set `HERMES_AGENT_DIR` or `PHONE_APP_PYTHON` in the LaunchAgent, or re-run `./install.sh`.
+- **Approval prompt in a terminal `hermes` chat does not show on the phone:** expected. Hermes answers terminal prompts in that terminal; the plugin only sees desktop and messaging prompts.
 - **Desktop approval answered on the phone but nothing happened:** check `agent.log` for `phone-approvals:` lines and run `plugin_test.py`. If it fails after a Hermes update, disable the plugin until fixed; prompts then work only on the desktop.

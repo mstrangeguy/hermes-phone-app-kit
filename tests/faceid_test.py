@@ -1,7 +1,7 @@
 """Offline test of the Face ID (passkey) lock in faceid.py and serve.py.
 
 Usage (needs the `cryptography` package, e.g. the Hermes venv):
-  ~/.hermes/hermes-agent/venv/bin/python -I tests/faceid_test.py <repo-dir> <empty-scratch-dir>
+  scripts/py -I tests/faceid_test.py <repo-dir> <empty-scratch-dir>
 
 A software passkey with a real P-256 key stands in for the iPhone. A copy of
 the proxy runs on a spare port against a scratch HERMES_HOME and a fake Hermes

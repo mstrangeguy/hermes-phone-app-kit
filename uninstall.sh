@@ -3,8 +3,8 @@
 # server stays on) and this folder alone; delete the folder yourself after.
 #
 # Removes: the LaunchAgent, the Tailscale Serve port (only if it points at this
-# proxy), the phone-approvals plugin link (after disabling it), the update-check
-# cron job and its wrapper script.
+# proxy), the phone-approvals plugin link (after disabling it), the skill link,
+# the update-check cron job and its wrapper script.
 set -uo pipefail
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin:$PATH"
 
@@ -14,13 +14,13 @@ export HERMES_HOME   # every `hermes` command below acts on this home
 LABEL="${PHONE_APP_LABEL:-com.hermes.phone-chat}"
 HTTPS_PORT="${PHONE_APP_HTTPS_PORT:-8443}"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
-PY="${HERMES_AGENT_DIR:-$HERMES_HOME/hermes-agent}/venv/bin/python"
-[ -x "$PY" ] || PY=/usr/bin/python3
+PY="$(/bin/bash "$ROOT/scripts/py" --which 2>/dev/null)" || PY=""
+[ -n "$PY" ] && [ -x "$PY" ] || PY=/usr/bin/python3
 PORT="$("$PY" -I "$ROOT/scripts/kit.py" config-get "$ROOT/config.json" port 2>/dev/null)"; PORT="${PORT:-8643}"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/phone-app-uninstall.XXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
-read -r -p "Remove the Hermes phone app's service, Tailscale port, plugin link and cron job? [y/N] " r || r=""
+read -r -p "Remove the Hermes phone app's service, Tailscale port, plugin and skill links, and cron job? [y/N] " r || r=""
 case "$r" in y|Y|yes) ;; *) echo "Nothing changed."; exit 0 ;; esac
 
 # Service
@@ -47,6 +47,12 @@ link="$HERMES_HOME/plugins/phone-approvals"
 if [ -L "$link" ] && [ "$(readlink "$link")" = "$ROOT/plugin/phone-approvals" ]; then
   hermes plugins disable phone-approvals >/dev/null 2>&1 || true
   rm -f "$link" && echo "removed plugin link (quit and reopen the desktop app to unload it)"
+fi
+
+# Skill
+skill_link="$HERMES_HOME/skills/hermes-phone-app"
+if [ -L "$skill_link" ] && [ "$(readlink "$skill_link")" = "$ROOT/skill" ]; then
+  rm -f "$skill_link" && echo "removed skill link"
 fi
 
 # Cron
