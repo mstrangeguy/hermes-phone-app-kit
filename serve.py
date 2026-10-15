@@ -415,6 +415,153 @@ def holder_alive(holder):
     return True
 
 
+# --- Profiles -----------------------------------------------------------------
+# Hermes serves every profile on the default listener under /p/<profile>/, and
+# each profile checks its own API_SERVER_KEY. A profile is offered to the page
+# when its .env has a usable key. Requests for it go out with that key, added
+# here: in Face ID mode always, in API-key mode once the page's key (the
+# default profile's) has been checked. The keys never reach the phone.
+
+PROFILES_PATH = "/phone-api/profiles"
+META_PATH = "/phone-api/meta"
+PROFILE_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+PROFILE_PATH = re.compile(r"^/p/([^/]+)(/.*)?$")
+MIN_KEY = 16
+
+
+def profile_home(name):
+    if name in (None, "", "default"):
+        return HERMES_HOME
+    if not PROFILE_NAME.match(name):
+        return None
+    return os.path.join(HERMES_HOME, "profiles", name)
+
+
+def profile_key(name):
+    if name in (None, "", "default"):
+        return server_key()
+    home = profile_home(name)
+    if not home:
+        return ""
+    key = read_env(os.path.join(home, ".env"), ("API_SERVER_KEY",)).get("API_SERVER_KEY", "")
+    return key if len(key) >= MIN_KEY and all(32 < ord(ch) < 127 for ch in key) else ""
+
+
+def served_profiles():
+    """"default" first, then each profile with its own usable API key, by name."""
+    out = ["default"]
+    try:
+        names = sorted(os.listdir(os.path.join(HERMES_HOME, "profiles")))
+    except OSError:
+        names = []
+    for name in names:
+        if name != "default" and PROFILE_NAME.match(name) and profile_key(name):
+            out.append(name)
+    return out
+
+
+def split_profile(local):
+    """'/p/<name>/rest' -> (name, '/rest'); any other path -> ('default', path).
+    An unknown or keyless profile -> (None, path)."""
+    match = PROFILE_PATH.match(local)
+    if not match:
+        return "default", local
+    name = match.group(1)
+    if name == "default" or name not in served_profiles():
+        return None, local
+    return name, match.group(2) or "/"
+
+
+def profile_file(name, filename, default_path):
+    """A per-profile file. The default profile keeps the module paths (tests point them elsewhere)."""
+    home = profile_home(name)
+    if name in (None, "", "default") or not home:
+        return default_path
+    return os.path.join(home, filename)
+
+
+def ro_connect(path):
+    """Read-only. A WAL database whose -shm this user cannot map falls back to immutable."""
+    try:
+        conn = sqlite3.connect("file:%s?mode=ro" % urllib.parse.quote(path), uri=True, timeout=2)
+        conn.execute("SELECT 1 FROM sqlite_master LIMIT 1")
+        return conn
+    except sqlite3.Error:
+        return sqlite3.connect("file:%s?immutable=1" % urllib.parse.quote(path), uri=True, timeout=2)
+
+
+def norm_path(path):
+    return os.path.normcase(os.path.abspath(os.path.expanduser(str(path).strip()))).rstrip("/\\")
+
+
+def project_folders(projects_db):
+    """[(folder, name)] for live projects, longest folder first, as Hermes resolves them."""
+    if not os.path.exists(projects_db):
+        return []
+    conn = ro_connect(projects_db)
+    try:
+        rows = conn.execute(
+            "SELECT pf.path, p.name FROM project_folders pf JOIN projects p ON p.id = pf.project_id "
+            "WHERE p.archived = 0").fetchall()
+    finally:
+        conn.close()
+    out = [(norm_path(folder), name) for folder, name in rows if folder and name]
+    out.sort(key=lambda item: len(item[0]), reverse=True)
+    return out
+
+
+def project_for(folders, cwd, repo_root):
+    for path in (cwd, repo_root):
+        if not path or not str(path).strip():
+            continue
+        target = norm_path(path)
+        for folder, name in folders:
+            if target == folder or target.startswith(folder + os.sep):
+                return name
+    return ""
+
+
+ARCHIVED_LIMIT = 100
+
+
+def session_meta(profile, ids, archived=False):
+    """Project names for *ids*, and (with *archived*) the profile's archived
+    sessions in the shape /api/sessions uses. Hermes's list API has neither."""
+    folders = project_folders(profile_file(profile, "projects.db", os.path.join(HERMES_HOME, "projects.db")))
+    conn = ro_connect(profile_file(profile, "state.db", STATE_DB))
+    meta, rows = {}, []
+    try:
+        ids = [i for i in ids if SESSION_ID.match(i)][:200]
+        if ids:
+            marks = ",".join("?" * len(ids))
+            for sid, cwd, root in conn.execute(
+                    "SELECT id, cwd, git_repo_root FROM sessions WHERE id IN (%s)" % marks, ids):
+                meta[sid] = {"project": project_for(folders, cwd, root)}
+        if archived:
+            # Roots only: a compression continuation is shown through its root.
+            for row in conn.execute(
+                    "SELECT s.id, s.title, s.source, s.started_at, "
+                    "COALESCE(s.last_activity_at, s.ended_at, s.started_at), s.message_count, "
+                    "s.input_tokens, s.output_tokens, s.estimated_cost_usd, s.actual_cost_usd, s.cwd, "
+                    "s.git_repo_root, (SELECT substr(m.content, 1, 120) FROM messages m "
+                    "WHERE m.session_id = s.id AND m.role = 'user' ORDER BY m.id LIMIT 1) "
+                    "FROM sessions s LEFT JOIN sessions p ON p.id = s.parent_session_id "
+                    "WHERE s.archived = 1 AND COALESCE(s.hidden, 0) = 0 "
+                    "AND (s.parent_session_id IS NULL OR COALESCE(p.end_reason, '') != 'compression') "
+                    "ORDER BY 5 DESC LIMIT ?", (ARCHIVED_LIMIT,)):
+                project = project_for(folders, row[10], row[11])
+                rows.append({
+                    "id": row[0], "title": row[1], "source": row[2], "started_at": row[3],
+                    "last_active": row[4], "message_count": row[5], "input_tokens": row[6] or 0,
+                    "output_tokens": row[7] or 0, "estimated_cost_usd": row[8], "actual_cost_usd": row[9],
+                    "preview": row[12] if isinstance(row[12], str) else "", "archived": True,
+                    "pinned": False})
+                meta[row[0]] = {"project": project}
+    finally:
+        conn.close()
+    return {"meta": meta, "archived": rows if archived else None}
+
+
 def session_busy(session_id, db_path=None):
     uri = "file:%s?mode=ro" % urllib.parse.quote(db_path or STATE_DB)
     conn = sqlite3.connect(uri, uri=True, timeout=2)
@@ -580,6 +727,15 @@ def record_decision(request_id, choice, base=None):
     return 202
 
 
+def approval_base(request_id):
+    """The approvals folder (of whichever profile) where *request_id* is pending."""
+    for name in served_profiles():
+        base = profile_file(name, "phone-approvals", APPROVALS_DIR)
+        if any(item["request_id"] == request_id for item in desktop_approvals(base)):
+            return base
+    return APPROVALS_DIR
+
+
 def read_body(client, lines, leftover):
     """A small request body (JSON). Raises ValueError when absent or too big."""
     _fields, _names, length, chunked = header_map(lines)
@@ -619,7 +775,7 @@ def serve_decide(client, lines, leftover):
             log("desktop approval refused: %s" % exc)
             json_error(client, 403, "Forbidden", "faceid_required", "Face ID check failed. Try again.")
             return
-    status = record_decision(data.get("request_id"), choice)
+    status = record_decision(data.get("request_id"), choice, approval_base(data.get("request_id")))
     if status == 202:
         log("approval answered from the phone: %s" % choice)
         send_response(client, 202, "Accepted", '{"ok":true}', "application/json")
@@ -662,29 +818,84 @@ def key_refused(client, lines):
     return False
 
 
+def all_active():
+    """active_sessions and desktop approvals for every served profile. Each
+    entry and approval names its profile. One unreadable profile is skipped."""
+    active, approvals, failed = {}, [], False
+    for name in served_profiles():
+        items = desktop_approvals(profile_file(name, "phone-approvals", APPROVALS_DIR))
+        for item in items:
+            item["profile"] = name
+        try:
+            part = active_sessions(profile_file(name, "state.db", STATE_DB),
+                                   profile_file(name, "runs_idempotency.db", RUNS_DB), items)
+        except sqlite3.Error as exc:
+            log("active check (%s): %s" % (name, type(exc).__name__))
+            failed = failed or name == "default"
+            part = {}
+        for sid, entry in part.items():
+            active[sid] = dict(entry, profile=name)
+        approvals.extend(items)
+    approvals.sort(key=lambda item: item.get("created") or 0)
+    return (None if failed and not active else active), approvals
+
+
 def serve_active(client, lines):
     if key_refused(client, lines):
         return
     note_page()
-    approvals = desktop_approvals()
+    active, approvals = all_active()
+    send_response(client, 200, "OK", json.dumps({"active": active, "approvals": approvals}), "application/json")
+
+
+def query_of(target):
+    return urllib.parse.parse_qs(mounted_target(target).partition("?")[2])
+
+
+def query_profile(client, query):
+    """The ?profile= of a local endpoint, checked. Sends 404 and returns None if unknown."""
+    name = (query.get("profile") or ["default"])[0] or "default"
+    if name not in served_profiles():
+        json_error(client, 404, "Not Found", "unknown_profile", "Unknown profile")
+        return None
+    return name
+
+
+def serve_profiles(client, lines):
+    if key_refused(client, lines):
+        return
+    send_response(client, 200, "OK", json.dumps({"profiles": served_profiles()}), "application/json")
+
+
+def serve_meta(client, target, lines):
+    if key_refused(client, lines):
+        return
+    query = query_of(target)
+    profile = query_profile(client, query)
+    if profile is None:
+        return
+    ids = [i for i in ",".join(query.get("ids") or []).split(",") if i]
     try:
-        body = json.dumps({"active": active_sessions(approvals=approvals), "approvals": approvals})
+        body = json.dumps(session_meta(profile, ids, (query.get("archived") or [""])[0] == "1"))
     except sqlite3.Error as exc:
-        log("active check: %s" % type(exc).__name__)
-        body = json.dumps({"active": None, "approvals": approvals})
+        log("meta (%s): %s" % (profile, type(exc).__name__))
+        body = json.dumps({"meta": {}, "archived": None})
     send_response(client, 200, "OK", body, "application/json")
 
 
 def serve_busy(client, target, lines):
     if key_refused(client, lines):
         return
-    query = urllib.parse.parse_qs(mounted_target(target).partition("?")[2])
+    query = query_of(target)
     session_id = (query.get("session") or [""])[0]
     if not SESSION_ID.match(session_id):
         send_response(client, 400, "Bad Request", '{"error":{"message":"Bad session id"}}', "application/json")
         return
+    profile = query_profile(client, query)
+    if profile is None:
+        return
     try:
-        body = json.dumps(session_busy(session_id))
+        body = json.dumps(session_busy(session_id, profile_file(profile, "state.db", STATE_DB)))
     except sqlite3.Error as exc:
         log("busy check: %s" % type(exc).__name__)
         body = json.dumps({"busy": None})
@@ -698,6 +909,10 @@ def serve_busy(client, target, lines):
 # that one approval. Deny never needs Face ID: refusing is always safe.
 
 AUTH_PREFIX = "/phone-api/auth/"
+# Answered here, not by Hermes: no key goes out for them.
+LOCAL_API = (BUSY_PATH, ACTIVE_PATH, DECIDE_PATH, PROFILES_PATH, META_PATH)
+# Polls that must not keep a Face ID session awake.
+BACKGROUND = (BUSY_PATH, ACTIVE_PATH, PROFILES_PATH, META_PATH)
 RUN_APPROVAL = re.compile(r"^/v1/runs/([A-Za-z0-9_.:-]{1,128})/approval$")
 
 
@@ -841,23 +1056,37 @@ def handle_client(client, upstream_addr=UPSTREAM):
         if local.startswith(AUTH_PREFIX):
             serve_auth(client, method, local, lines, leftover)
             return
+        # /p/<profile>/... goes to that profile on the same Hermes listener,
+        # with that profile's key. "rest" is the path inside the profile.
+        profile, rest = split_profile(local)
+        if profile is None:
+            log("%s %s refused, unknown profile" % (method, path))
+            json_error(client, 404, "Not Found", "unknown_profile", "Unknown profile")
+            return
         api_key = None
+        local_api = local in LOCAL_API
         if faceid.enrolled() and not page_request(method, target):
             token = faceid.cookie_token(lines)
             # Background polls do not count as use, so an idle page still locks.
-            background = local in (BUSY_PATH, ACTIVE_PATH) or (method == "GET" and local.startswith("/v1/runs/"))
+            background = local in BACKGROUND or (method == "GET" and rest.startswith("/v1/runs/"))
             if not faceid.session_valid(token, touch=not background):
                 locked(client)
                 return
-            if local not in (BUSY_PATH, ACTIVE_PATH, DECIDE_PATH):
-                api_key = server_key()
+            if not local_api:
+                api_key = profile_key(profile)
                 if not api_key:
                     send_response(client, 503, "Service Unavailable",
                                   '{"error":{"message":"No API key configured"}}', "application/json")
                     return
-                if method == "POST" and RUN_APPROVAL.match(local):
-                    serve_run_approval(client, head, local, lines, leftover, upstream_addr, api_key)
+                if method == "POST" and RUN_APPROVAL.match(rest):
+                    serve_run_approval(client, head, rest, lines, leftover, upstream_addr, api_key)
                     return
+        elif profile != "default" and not local_api and not page_request(method, target):
+            # API-key mode: the page holds the default profile's key. Check it
+            # here, then send the request on with this profile's own key.
+            if key_refused(client, lines):
+                return
+            api_key = profile_key(profile)
         if local == BUSY_PATH and method == "GET":
             # Polled every few seconds; not logged, to keep serve.log readable.
             serve_busy(client, target, lines)
@@ -865,11 +1094,17 @@ def handle_client(client, upstream_addr=UPSTREAM):
         if local == ACTIVE_PATH and method == "GET":
             serve_active(client, lines)
             return
+        if local == PROFILES_PATH and method == "GET":
+            serve_profiles(client, lines)
+            return
+        if local == META_PATH and method == "GET":
+            serve_meta(client, target, lines)
+            return
         if local == DECIDE_PATH and method == "POST":
             serve_decide(client, lines, leftover)
             return
         log("%s %s" % (method, path))
-        note_poll(method, local)
+        note_poll(method, rest)
         if page_request(method, target):
             serve_page(client, method, target)
             return
@@ -1132,8 +1367,18 @@ def watch_runs():
             if config is None:
                 known = None
             else:
-                check_desktop(config, desktop_approvals(config.get("approvals_dir")), desktop_alerted)
-                runs = read_runs(config.get("db") or RUNS_DB)
+                if config.get("approvals_dir"):
+                    approvals = desktop_approvals(config["approvals_dir"])
+                else:
+                    approvals = all_active()[1]
+                check_desktop(config, approvals, desktop_alerted)
+                if config.get("db"):
+                    runs = read_runs(config["db"])
+                else:
+                    # Every profile's phone runs. Run ids are unique across profiles.
+                    runs = {}
+                    for name in served_profiles():
+                        runs.update(read_runs(profile_file(name, "runs_idempotency.db", RUNS_DB)))
                 if known is None:
                     # Start from what is already there, so a restart does not
                     # replay old finishes. A pending approval still alerts.

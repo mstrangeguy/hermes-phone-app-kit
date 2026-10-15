@@ -35,7 +35,7 @@ Run Python for this app with `scripts/py`, never a hardcoded interpreter path. I
 Run every suite with Hermes's venv Python, each with its own empty scratch folder:
 
 ```bash
-for t in plugin faceid approvals alerts busy; do
+for t in plugin faceid approvals alerts busy profiles; do
   scripts/py -I tests/${t}_test.py "$PWD" "$(mktemp -d)" | tail -1
 done
 ```
