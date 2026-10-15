@@ -409,10 +409,18 @@ function show(id) {
   }
 }
 
-// Fit the app to the visible area when the keyboard is up. Only the keyboard
-// may move it: an iOS rubber-band at the end of the transcript also fires
-// visualViewport scroll with a bouncing offsetTop, and following that made
-// the whole app shake. Unchanged values are not rewritten.
+// Fit the app to the visible area when the keyboard is up, so the composer
+// sits right on the keyboard and the header stays at the top.
+//
+// The app is position: fixed, so it is placed against the layout viewport,
+// which is what visualViewport.offsetTop is measured from. It used to be in
+// normal flow: when iOS also scrolled the page to reveal the box, the app
+// moved by offsetTop AND by that page scroll, about twice the keyboard, and
+// the composer ended up above the screen. Any page scroll is undone too.
+//
+// Only the keyboard may move it: an iOS rubber-band at the end of the
+// transcript also fires visualViewport scroll with a bouncing offsetTop, and
+// following that made the whole app shake. Unchanged values are not rewritten.
 const viewportLast = { h: "", top: "" };
 function syncViewport() {
   const vv = window.visualViewport;
@@ -420,13 +428,24 @@ function syncViewport() {
   const keyboard = vv.height < window.innerHeight - 80;
   const h = Math.round(vv.height) + "px";
   const top = (keyboard ? Math.max(0, Math.round(vv.offsetTop)) : 0) + "px";
+  if (window.scrollY || window.scrollX) window.scrollTo(0, 0);
+  document.documentElement.classList.toggle("kb", keyboard);
+  if (h === viewportLast.h && top === viewportLast.top) return;
+  // Keep the transcript anchored to its bottom edge: what you were reading
+  // (usually the newest message) stays just above the composer.
+  const t = document.getElementById("transcript");
+  const fromBottom = t ? t.scrollHeight - t.scrollTop - t.clientHeight : 0;
   if (h !== viewportLast.h) document.documentElement.style.setProperty("--vvh", (viewportLast.h = h));
   if (top !== viewportLast.top) document.documentElement.style.setProperty("--vvtop", (viewportLast.top = top));
+  if (t && t.offsetParent) t.scrollTop = Math.max(0, t.scrollHeight - t.clientHeight - fromBottom);
 }
 if (window.visualViewport) {
   visualViewport.addEventListener("resize", syncViewport);
   visualViewport.addEventListener("scroll", syncViewport);
 }
+// iOS settles the keyboard after its animation; catch the last position too.
+document.addEventListener("focusin", () => { syncViewport(); setTimeout(syncViewport, 350); });
+document.addEventListener("focusout", () => setTimeout(syncViewport, 350));
 syncViewport();
 
 function escapeHtml(value) {
