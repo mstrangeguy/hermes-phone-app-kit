@@ -40,6 +40,7 @@ The installer asks before each change. In order, it:
 1. With Tailscale connected, open the URL the installer printed in Safari.
 2. Share → Add to Home Screen. Open the app from the new icon.
 3. Enter the setup code, then tap Set up Face ID. From then on the app unlocks with Face ID, and allowing a command needs Face ID again.
+4. The menu button (or the word Hermes) opens a side panel: Sessions or Cron jobs, and the list's view options. Cron jobs are read-only: each job's schedule, state and past runs with their saved output.
 
 If the code expired: `cd ~/.hermes/phone-chat && scripts/py -I serve.py --setup-code`
 
@@ -86,7 +87,7 @@ This app is a remote control for an agent that can run commands on your Mac. Rea
 
 - The proxy listens on `127.0.0.1` only. The only way in from outside is Tailscale Serve on your tailnet. There is no public URL.
 - Every request must carry an allowed Tailscale login, which Tailscale Serve sets and clients cannot forge. Devices shared into your tailnet, or tagged devices, are refused.
-- With Face ID enrolled, the phone never holds the Hermes API key. The Mac adds it to each request. Face ID unlocks a session that ends after 30 minutes idle or 12 hours. Allow once needs a fresh Face ID check tied to that one prompt. Deny never needs it.
+- With Face ID enrolled, the phone never holds the Hermes API key. The Mac adds it to each request. Opening the app runs Face ID with no tap (iOS allows one such prompt per page load; if it refuses, tap Unlock). The app locks as soon as it leaves the screen, and after 10 minutes without a touch; replies keep running on the Mac. The Mac also ends an unlock after 30 minutes idle or 12 hours. Allow once needs a fresh Face ID check tied to that one prompt. Deny never needs it.
 - The page loads nothing from other sites. Its content policy blocks inline scripts, and model output is cleaned before display.
 - If this Mac is managed by an employer, check with them before opening a remote path into it.
 

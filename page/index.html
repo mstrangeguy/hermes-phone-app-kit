@@ -68,9 +68,11 @@
 
   <section class="screen" id="list-screen" hidden>
     <header class="bar">
-      <div class="wordmark">Hermes</div>
+      <button class="icon nav-btn" type="button" data-drawer aria-label="Menu: sessions, cron, view" aria-expanded="false" aria-controls="drawer">
+        <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M3 5h12M3 9h12M3 13h12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      </button>
+      <button class="wordmark wordmark-btn" type="button" data-drawer>Hermes</button>
       <div class="grow"><button class="profile-chip" type="button" id="profile-chip" hidden>Default</button></div>
-      <button class="textbtn" type="button" id="key-btn">Key</button>
     </header>
     <div class="list-actions">
       <button class="new-session" type="button" id="new-chat">
@@ -79,21 +81,50 @@
         </span>
         New session
       </button>
-      <button class="icon view-btn" type="button" id="view-btn" aria-label="View: profile, group, sort, filter" aria-expanded="false" aria-controls="view-sheet">
-        <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M3 5h12M5.5 9h7M8 13h2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
-      </button>
     </div>
     <div class="list" id="session-list"></div>
-    <div class="sheet-wrap" id="view-sheet" hidden>
-      <div class="sheet" role="dialog" aria-label="View options">
-        <div class="sheet-head">
-          <div class="title grow">View</div>
-          <button class="textbtn primary" type="button" id="sheet-done">Done</button>
-        </div>
-        <div class="sheet-body" id="sheet-body"></div>
-      </div>
-    </div>
   </section>
+
+  <section class="screen" id="cron-screen" hidden>
+    <header class="bar">
+      <button class="icon nav-btn" type="button" data-drawer aria-label="Menu: sessions, cron, view" aria-expanded="false" aria-controls="drawer">
+        <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M3 5h12M3 9h12M3 13h12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      </button>
+      <button class="wordmark wordmark-btn" type="button" data-drawer>Hermes</button>
+      <div class="title grow cron-title">Cron</div>
+      <button class="icon" type="button" id="cron-refresh" aria-label="Refresh">
+        <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M14.5 9a5.5 5.5 0 1 1-1.6-3.9M14.5 3v3.2h-3.2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </header>
+    <div class="list" id="cron-list"></div>
+  </section>
+
+  <section class="screen" id="job-screen" hidden>
+    <header class="bar">
+      <button class="icon" type="button" id="job-back" aria-label="Cron jobs">
+        <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M11.5 3.5 6 9l5.5 5.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <div class="title grow" id="job-title">Cron job</div>
+      <span class="tag" id="job-profile" hidden></span>
+    </header>
+    <div class="transcript job-body" id="job-body"></div>
+  </section>
+
+  <div class="drawer-wrap" id="drawer" hidden>
+    <nav class="drawer" aria-label="Menu">
+      <div class="drawer-head">
+        <div class="wordmark">Hermes</div>
+      </div>
+      <div class="drawer-modes">
+        <button class="drawer-mode" type="button" data-mode="sessions">Sessions</button>
+        <button class="drawer-mode" type="button" data-mode="cron">Cron jobs</button>
+      </div>
+      <div class="sheet-body" id="sheet-body"></div>
+      <div class="drawer-foot">
+        <button class="textbtn" type="button" id="key-btn">Key</button>
+      </div>
+    </nav>
+  </div>
 
   <section class="screen" id="chat-screen" hidden>
     <header class="bar">

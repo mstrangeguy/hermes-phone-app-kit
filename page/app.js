@@ -289,14 +289,22 @@ function credList(list) {
   return (list || []).map((c) => ({ type: c.type || "public-key", id: fromB64(c.id) }));
 }
 
+// The Face ID sheet may hide the page for a moment; that must not count as
+// leaving the app (see lockNow).
+async function prompting(work) {
+  LOCK.prompting++;
+  try { return await work(); }
+  finally { LOCK.prompting--; LOCK.lastInput = Date.now(); }
+}
+
 async function passkeyGet(opts) {
-  const cred = await navigator.credentials.get({ publicKey: {
+  const cred = await prompting(() => navigator.credentials.get({ publicKey: {
     challenge: fromB64(opts.challenge),
     rpId: opts.rpId,
     timeout: opts.timeout,
     userVerification: opts.userVerification || "required",
     allowCredentials: credList(opts.allowCredentials)
-  } });
+  } }));
   return {
     id: cred.id, rawId: toB64(cred.rawId), type: cred.type,
     response: {
@@ -308,7 +316,7 @@ async function passkeyGet(opts) {
 }
 
 async function passkeyCreate(opts) {
-  const cred = await navigator.credentials.create({ publicKey: {
+  const cred = await prompting(() => navigator.credentials.create({ publicKey: {
     challenge: fromB64(opts.challenge),
     rp: opts.rp,
     user: { id: fromB64(opts.user.id), name: opts.user.name, displayName: opts.user.displayName },
@@ -317,7 +325,7 @@ async function passkeyCreate(opts) {
     attestation: opts.attestation,
     timeout: opts.timeout,
     excludeCredentials: credList(opts.excludeCredentials)
-  } });
+  } }));
   return {
     id: cred.id, rawId: toB64(cred.rawId), type: cred.type,
     response: {
@@ -339,17 +347,22 @@ function lockError(text) {
 
 // The challenge is fetched before the tap, so Safari runs Face ID straight
 // from the tap instead of after a network wait.
-async function prefetchLogin() {
-  if (LOGIN.fetching || (LOGIN.opts && Date.now() - LOGIN.at < CHALLENGE_MS)) return;
-  LOGIN.fetching = true;
-  try {
-    const res = await fetch(apiBase() + "/phone-api/auth/login/options", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
-    if (res.ok) { LOGIN.opts = await res.json(); LOGIN.at = Date.now(); }
-  } catch (e) {
-  } finally {
-    LOGIN.fetching = false;
-  }
+// A second caller waits for the fetch already in flight instead of giving up
+// (the no-tap unlock starts while showLock's prefetch is still out).
+function prefetchLogin() {
+  if (LOGIN.fetching) return LOGIN.fetching;
+  if (LOGIN.opts && Date.now() - LOGIN.at < CHALLENGE_MS) return Promise.resolve();
+  LOGIN.fetching = (async () => {
+    try {
+      const res = await fetch(apiBase() + "/phone-api/auth/login/options", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      if (res.ok) { LOGIN.opts = await res.json(); LOGIN.at = Date.now(); }
+    } catch (e) {
+    } finally {
+      LOGIN.fetching = null;
+    }
+  })();
+  return LOGIN.fetching;
 }
 
 function showLock(message) {
@@ -358,10 +371,79 @@ function showLock(message) {
   show("lock-screen");
   lockError(message);
   prefetchLogin();
+  autoUnlock();
 }
+
+// --- Auto lock and Face ID without a tap -------------------------------------
+// WebKit allows one passkey request per page load without a tap. The page
+// spends it on unlocking: open the app and Face ID runs. Leaving the app (app
+// switcher, Home, screen off) or 10 minutes without a touch locks it: the
+// unlock cookie is dropped on the Mac and the lock screen covers the content.
+// Coming back reloads the page, which buys a fresh no-tap request. Replies keep
+// running on the Mac; the open session (URL hash), running replies and the
+// unsent draft come back after the unlock. The Unlock button stays for when
+// iOS refuses or the prompt is cancelled.
+const IDLE_LOCK_MS = 10 * 60 * 1000;
+const DRAFT_NAME = "hermes.phone.draft";
+const LOCK = { autoTried: false, prompting: 0, reloadOnShow: false, lastInput: Date.now() };
+
+function autoUnlock() {
+  if (LOCK.autoTried || !AUTH.faceid || document.visibilityState !== "visible") return;
+  LOCK.autoTried = true;
+  unlock();
+}
+
+function stashDraft() {
+  const text = $("draft").value;
+  try {
+    if (state.sessionId && text.trim()) sessionStorage.setItem(DRAFT_NAME, JSON.stringify({ id: state.sessionId, text }));
+  } catch (e) {}
+}
+
+function takeDraft(id) {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(DRAFT_NAME) || "null");
+    if (!saved || saved.id !== id) return "";
+    sessionStorage.removeItem(DRAFT_NAME);
+    return String(saved.text || "");
+  } catch (e) { return ""; }
+}
+
+function lockNow() {
+  if (!AUTH.faceid || LOCK.prompting) return;
+  // Already on the lock screen (say, Face ID was cancelled): coming back still
+  // reloads, so it asks again without a tap.
+  LOCK.reloadOnShow = true;
+  if (!AUTH.unlocked) return;
+  stashDraft();
+  $("draft").blur();
+  // keepalive: the page may be frozen right after it is hidden.
+  try { fetch(apiBase() + "/phone-api/auth/logout", { method: "POST", keepalive: true }).catch(() => {}); }
+  catch (e) {}
+  LOCK.autoTried = true;  // this page load's no-tap request is spent or saved for the reload
+  showLock("");
+}
+
+function resumeLocked() {
+  if (!LOCK.reloadOnShow) return false;
+  LOCK.reloadOnShow = false;
+  location.reload();
+  return true;
+}
+
+for (const name of ["pointerdown", "keydown", "input"]) {
+  document.addEventListener(name, () => { LOCK.lastInput = Date.now(); }, { capture: true, passive: true });
+}
+setInterval(() => {
+  if (document.visibilityState === "visible" && Date.now() - LOCK.lastInput > IDLE_LOCK_MS) lockNow();
+}, 30000);
+window.addEventListener("pageshow", (event) => {
+  if (event.persisted && AUTH.faceid) location.reload();
+});
 
 async function unlock() {
   const button = $("unlock");
+  if (button.disabled) return;
   button.disabled = true;
   lockError("");
   try {
@@ -380,7 +462,8 @@ async function unlock() {
     AUTH.unlocked = true;
     await boot();
   } catch (e) {
-    lockError(faceIdError(e));
+    // A refused no-tap attempt is normal (iOS can say no); the button is the fallback.
+    lockError(e && e.name === "NotAllowedError" ? "" : faceIdError(e));
     prefetchLogin();
   } finally {
     button.disabled = false;
@@ -449,12 +532,14 @@ function setKey(value) {
   } catch (e) {}
 }
 
+const SCREENS = ["key-screen", "lock-screen", "setup-screen", "list-screen", "cron-screen", "job-screen", "chat-screen"];
 // The status bar takes the colour of the header under it, so it reads as one band.
-const BAR_COLOR = { "list-screen": "#010409" };
+const BAR_COLOR = { "list-screen": "#010409", "cron-screen": "#010409" };
 function show(id) {
-  for (const screen of ["key-screen", "lock-screen", "setup-screen", "list-screen", "chat-screen"]) {
+  for (const screen of SCREENS) {
     $(screen).hidden = screen !== id;
   }
+  if (id !== "list-screen" && id !== "cron-screen") toggleSheet(false);
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta) meta.setAttribute("content", BAR_COLOR[id] || "#0d1117");
 }
@@ -809,7 +894,7 @@ async function loadSessions(reset) {
   if (seq !== LIST.seq) return;
   renderSessions();
   // The Source choices come from the loaded rows; refresh an open sheet.
-  if (!$("view-sheet").hidden) renderSheet();
+  if (!$("drawer").hidden && DRAWER.mode === "sessions") renderSheet();
 }
 
 function listHasMore() {
@@ -1131,8 +1216,7 @@ function paintListHead() {
     chip.textContent = profileLabel(VIEW.profile);
     chip.hidden = PROFILES.list.length < 2 && VIEW.profile === "default";
   }
-  const btn = $("view-btn");
-  if (btn) btn.classList.toggle("on", viewChanged());
+  for (const btn of document.querySelectorAll("#list-screen button.nav-btn")) btn.classList.toggle("on", viewChanged());
 }
 
 function renderSessions() {
@@ -1281,12 +1365,491 @@ function renderSheet() {
   body.append(reset);
 }
 
+// --- Side drawer --------------------------------------------------------------
+// Opened by the menu button or the word Hermes. It switches between Sessions
+// and Cron jobs and holds that view's choices (the old View sheet), plus Lock.
+const DRAWER = { mode: "sessions", touchX: null };
+
 function toggleSheet(open) {
-  const sheet = $("view-sheet");
-  const showIt = open == null ? sheet.hidden : open;
-  sheet.hidden = !showIt;
-  $("view-btn").setAttribute("aria-expanded", showIt ? "true" : "false");
-  if (showIt) renderSheet();
+  const wrap = $("drawer");
+  const showIt = open == null ? wrap.hidden : open;
+  wrap.hidden = !showIt;
+  for (const button of document.querySelectorAll("button.nav-btn")) {
+    button.setAttribute("aria-expanded", showIt ? "true" : "false");
+  }
+  if (showIt) renderDrawer();
+}
+
+function renderDrawer() {
+  for (const button of document.querySelectorAll(".drawer-mode")) {
+    const on = button.dataset.mode === DRAWER.mode;
+    button.classList.toggle("on", on);
+    button.setAttribute("aria-current", on ? "page" : "false");
+  }
+  if (DRAWER.mode === "cron") renderCronSheet();
+  else renderSheet();
+}
+
+function pickMode(mode) {
+  toggleSheet(false);
+  if (mode === "cron") {
+    history.replaceState({ cron: true }, "", "#cron");
+    showCron();
+  } else {
+    history.replaceState({}, "", location.pathname);
+    showList();
+  }
+}
+
+// --- Cron jobs ------------------------------------------------------------------
+// Read-only: the Mac reads each profile's cron files (/phone-api/cron*).
+const CRON = { jobs: [], profile: "all", seq: 0, note: "", loaded: false, job: null, runs: null, open: {} };
+const CRON_PROFILE_NAME = "hermes.phone.cronProfile";
+try { CRON.profile = localStorage.getItem(CRON_PROFILE_NAME) || "all"; } catch (e) {}
+
+function stampOf(value) {
+  if (value == null || value === "") return 0;
+  if (typeof value === "number") return value > 1e12 ? value : value * 1000;
+  const n = Date.parse(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function relTime(ms) {
+  if (!ms) return "";
+  const delta = ms - Date.now();
+  const abs = Math.abs(delta);
+  const min = Math.round(abs / 60000);
+  let text;
+  if (min < 1) text = "now";
+  else if (min < 60) text = min + "m";
+  else if (min < 60 * 36) text = Math.round(min / 60) + "h";
+  else text = Math.round(min / 1440) + "d";
+  if (text === "now") return text;
+  return delta > 0 ? "in " + text : text + " ago";
+}
+
+function clockTime(ms) {
+  if (!ms) return "";
+  const d = new Date(ms);
+  const sameDay = dayStart(ms) === dayStart(Date.now());
+  const time = d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  return sameDay ? time : d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" }) + ", " + time;
+}
+
+// "15 3 * * *" -> "Daily 3:15 AM". Only the shapes people actually write;
+// anything else is shown as written.
+const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+function hm(h, m) {
+  const d = new Date(2000, 0, 1, h, m);
+  return d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+}
+function plainSchedule(text) {
+  const parts = String(text || "").trim().split(/\s+/);
+  if (parts.length !== 5) return text || "";
+  const [mi, ho, dom, mon, dow] = parts;
+  const num = /^\d+$/;
+  if (mon !== "*" || !num.test(mi)) return text;
+  if (ho === "*" && dom === "*" && dow === "*") return "Hourly at :" + mi.padStart(2, "0");
+  if (!/^\d+(,\d+)*$/.test(ho)) return text;
+  const times = ho.split(",").map((h) => hm(Number(h), Number(mi))).join(", ");
+  if (dom === "*" && dow === "*") return "Daily " + times;
+  if (dom === "*" && /^\d(,\d)*$/.test(dow)) return dow.split(",").map((d) => DOW[Number(d)] || d).join(", ") + " " + times;
+  if (dom === "*" && dow === "1-5") return "Weekdays " + times;
+  return text;
+}
+
+function jobHealth(job) {
+  const status = String(job.last_status || "").toLowerCase();
+  if (job.last_error || /error|fail/.test(status)) return "bad";
+  if (job.state === "paused" || job.enabled === false) return "paused";
+  return "";
+}
+
+function jobStateLabel(job) {
+  if (job.state === "completed") return "Finished";
+  if (job.state === "paused" || job.enabled === false) return "Paused";
+  return "";
+}
+
+function statusWord(status) {
+  return String(status || "").replace(/_/g, " ");
+}
+
+async function loadCron() {
+  const seq = ++CRON.seq;
+  try {
+    const res = await api("/phone-api/cron?profile=" + encodeURIComponent(CRON.profile));
+    if (!res.ok) throw new Error(await errorMessage(res));
+    const data = await res.json();
+    if (seq !== CRON.seq) return;
+    CRON.jobs = Array.isArray(data.jobs) ? data.jobs : [];
+    CRON.note = "";
+  } catch (e) {
+    if (e.status === 401) return showKey(e.message);
+    if (seq !== CRON.seq) return;
+    CRON.note = e.message || "Could not load cron jobs";
+  }
+  CRON.loaded = true;
+  renderCron();
+}
+
+function sortedJobs() {
+  // Scheduled jobs by next run; paused and finished ones after.
+  const rank = (job) => (jobStateLabel(job) ? 1 : 0);
+  return CRON.jobs.slice().sort((a, b) =>
+    rank(a) - rank(b) || (stampOf(a.next_run_at) || Infinity) - (stampOf(b.next_run_at) || Infinity) ||
+    String(a.name).localeCompare(String(b.name)));
+}
+
+function cronRow(job) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "session job";
+  const row = document.createElement("div");
+  row.className = "row";
+  const dot = document.createElement("span");
+  const health = jobHealth(job);
+  dot.className = "sdot" + (health ? " dot-" + health : "");
+  const name = document.createElement("span");
+  name.className = "name";
+  name.textContent = job.name || job.id;
+  const when = document.createElement("span");
+  when.className = "when";
+  const label = jobStateLabel(job);
+  when.textContent = label || relTime(stampOf(job.next_run_at));
+  row.append(dot, name, when);
+  const tags = document.createElement("div");
+  tags.className = "tags";
+  const preview = document.createElement("span");
+  preview.className = "preview";
+  const last = stampOf(job.last_run_at);
+  preview.textContent = [plainSchedule(job.schedule), last ? "last " + relTime(last) + (job.last_status ? " · " + statusWord(job.last_status) : "") : "never run"]
+    .filter(Boolean).join(" · ");
+  tags.append(preview);
+  if (job.profile && job.profile !== "default") {
+    const tag = document.createElement("span");
+    tag.className = "tag";
+    tag.textContent = profileLabel(job.profile);
+    tags.append(tag);
+  }
+  button.append(row, tags);
+  button.addEventListener("click", () => openJob(job, true));
+  return button;
+}
+
+function renderCron() {
+  const root = $("cron-list");
+  const scroll = root.scrollTop;
+  root.textContent = "";
+  $("cron-screen").querySelector(".cron-title").textContent = CRON.profile === "all" ? "Cron" : "Cron · " + profileLabel(CRON.profile);
+  if (CRON.note) {
+    const note = document.createElement("div");
+    note.className = "empty note-line";
+    note.textContent = CRON.note;
+    root.append(note);
+  }
+  const jobs = sortedJobs();
+  if (!jobs.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = CRON.loaded ? "No cron jobs." : "Loading…";
+    root.append(empty);
+  }
+  let split = false;
+  jobs.forEach((job) => {
+    if (!split && jobStateLabel(job)) {
+      split = true;
+      const head = document.createElement("div");
+      head.className = "bucket";
+      head.textContent = "Paused and finished";
+      root.append(head);
+    }
+    root.append(cronRow(job));
+  });
+  root.scrollTop = scroll;
+}
+
+function renderCronSheet() {
+  const body = $("sheet-body");
+  body.textContent = "";
+  if (PROFILES.list.length > 1) {
+    const options = [["all", "All"]].concat(PROFILES.list.map((p) => [p, profileLabel(p)]));
+    body.append(sheetSection("Profile", chipRow(options, (id) => CRON.profile === id, (id) => {
+      if (CRON.profile === id) return;
+      CRON.profile = id;
+      try { localStorage.setItem(CRON_PROFILE_NAME, id); } catch (e) {}
+      CRON.jobs = [];
+      CRON.loaded = false;
+      renderCronSheet();
+      renderCron();
+      loadCron();
+    })));
+  }
+  const note = document.createElement("p");
+  note.className = "sheet-note";
+  note.textContent = "Read-only. Jobs are changed from the desktop app or a chat.";
+  body.append(note);
+}
+
+function showCron() {
+  DRAWER.mode = "cron";
+  CRON.job = null;
+  show("cron-screen");
+  renderCron();
+  loadCron();
+}
+
+function cronHashFor(job) {
+  return "#cron=" + encodeURIComponent(job.id) + (job.profile && job.profile !== "default" ? "&p=" + encodeURIComponent(job.profile) : "");
+}
+
+function cronHashTarget() {
+  const hash = location.hash || "";
+  if (hash === "#cron") return { list: true };
+  if (!hash.startsWith("#cron=")) return null;
+  const params = new URLSearchParams(hash.slice(1));
+  const id = params.get("cron") || "";
+  return id ? { id, profile: params.get("p") || "default" } : { list: true };
+}
+
+async function openCronTarget(target) {
+  if (!target || target.list) return showCron();
+  DRAWER.mode = "cron";
+  if (!CRON.jobs.length) await loadCron();
+  const job = CRON.jobs.find((j) => j.id === target.id && (j.profile || "default") === target.profile);
+  if (job) openJob(job, false);
+  else showCron();
+}
+
+function kvRow(dl, label, value, cls) {
+  if (value == null || value === "") return;
+  const dt = document.createElement("dt");
+  dt.textContent = label;
+  const dd = document.createElement("dd");
+  dd.textContent = value;
+  if (cls) dd.className = cls;
+  dl.append(dt, dd);
+}
+
+function jobSummary(job) {
+  const box = document.createElement("section");
+  box.className = "job-sum";
+  const dl = document.createElement("dl");
+  dl.className = "kv";
+  kvRow(dl, "Schedule", plainSchedule(job.schedule) + (plainSchedule(job.schedule) !== job.schedule ? "  (" + job.schedule + ")" : ""));
+  kvRow(dl, "State", jobStateLabel(job) || "Scheduled");
+  const next = stampOf(job.next_run_at);
+  if (!jobStateLabel(job)) kvRow(dl, "Next run", next ? clockTime(next) + " (" + relTime(next) + ")" : "");
+  const last = stampOf(job.last_run_at);
+  kvRow(dl, "Last run", last ? clockTime(last) + (job.last_status ? " · " + statusWord(job.last_status) : "") : "Never");
+  kvRow(dl, "Runs", job.runs_completed != null ? String(job.runs_completed) : "");
+  kvRow(dl, "Kind", job.no_agent ? "Script only" : "Agent" + (Array.isArray(job.skills) && job.skills.length ? " · " + job.skills.join(", ") : ""));
+  kvRow(dl, "Script", job.script || "");
+  kvRow(dl, "Delivers to", job.deliver || "");
+  if (job.failure_streak) kvRow(dl, "Failures in a row", String(job.failure_streak), "bad");
+  kvRow(dl, "Last error", job.last_error || "", "bad");
+  kvRow(dl, "Delivery error", job.last_delivery_error || "", "bad");
+  kvRow(dl, "Paused because", job.paused_reason || "");
+  box.append(dl);
+  if (job.prompt) {
+    const details = document.createElement("details");
+    details.className = "job-prompt";
+    const summary = document.createElement("summary");
+    summary.textContent = "Prompt";
+    const pre = document.createElement("pre");
+    pre.textContent = job.prompt;
+    details.append(summary, pre);
+    box.append(details);
+  }
+  return box;
+}
+
+async function openJob(job, push) {
+  CRON.job = job;
+  CRON.runs = null;
+  CRON.open = {};
+  DRAWER.mode = "cron";
+  toggleSheet(false);
+  if (push) history.pushState({ job: job.id, profile: job.profile }, "", cronHashFor(job));
+  $("job-title").textContent = job.name || job.id;
+  const tag = $("job-profile");
+  const other = job.profile && job.profile !== "default";
+  tag.hidden = !other;
+  tag.textContent = other ? profileLabel(job.profile) : "";
+  show("job-screen");
+  renderJob();
+  try {
+    const res = await api("/phone-api/cron/runs?profile=" + encodeURIComponent(job.profile || "default") +
+      "&job=" + encodeURIComponent(job.id));
+    if (!res.ok) throw new Error(await errorMessage(res));
+    const data = await res.json();
+    if (CRON.job !== job) return;
+    CRON.runs = Array.isArray(data.runs) ? data.runs : [];
+  } catch (e) {
+    if (e.status === 401) return showKey(e.message);
+    if (CRON.job !== job) return;
+    CRON.runs = { error: e.message || "Could not load runs" };
+  }
+  renderJob();
+}
+
+function runStatus(run) {
+  if (run.status === "running" || run.status === "claimed") return ["Running", "working"];
+  if (run.status === "failed" || run.error) return ["Failed", "bad"];
+  if (run.status === "completed") return ["Done", ""];
+  if (run.status === "unknown") return ["Unknown", "paused"];
+  return ["", ""];
+}
+
+function runRow(job, run, index) {
+  const wrap = document.createElement("div");
+  wrap.className = "run";
+  const head = document.createElement("button");
+  head.type = "button";
+  head.className = "run-head";
+  const [label, tone] = runStatus(run);
+  const dot = document.createElement("span");
+  dot.className = "sdot" + (tone ? " dot-" + tone : "");
+  const when = document.createElement("span");
+  when.className = "run-when";
+  when.textContent = clockTime(stampOf(run.at || run.started || run.finished));
+  const meta = document.createElement("span");
+  meta.className = "run-meta";
+  const start = stampOf(run.started);
+  const end = stampOf(run.finished);
+  const parts = [label];
+  if (start && end && end >= start) parts.push(fmtDur((end - start) / 1000));
+  if (run.delivery) parts.push(statusWord(run.delivery));
+  meta.textContent = parts.filter(Boolean).join(" · ");
+  const chev = document.createElement("span");
+  chev.className = "chev";
+  chev.textContent = "›";
+  head.append(dot, when, meta, chev);
+  wrap.append(head);
+  const key = String(index);
+  const open = CRON.open[key];
+  head.setAttribute("aria-expanded", open ? "true" : "false");
+  head.addEventListener("click", () => {
+    if (CRON.open[key]) delete CRON.open[key];
+    else CRON.open[key] = { full: false };
+    renderJob();
+    if (CRON.open[key] && run.output && CRON.open[key].text == null) loadRunOutput(job, run, key);
+  });
+  if (open) wrap.append(runBody(job, run, open));
+  return wrap;
+}
+
+// Agent runs log the prompt (with whole skills) before "## Response"; script
+// runs log their output after a "---" rule. Show the useful part first.
+function outputMain(text) {
+  const at = text.lastIndexOf("\n## Response");
+  if (at >= 0) return text.slice(at + "\n## Response".length).trim();
+  const rule = text.indexOf("\n---\n");
+  if (rule >= 0) return text.slice(rule + 5).trim();
+  return text.trim();
+}
+
+function runBody(job, run, open) {
+  const body = document.createElement("div");
+  body.className = "run-body";
+  if (run.error) {
+    const err = document.createElement("div");
+    err.className = "run-err";
+    err.textContent = run.error;
+    body.append(err);
+  }
+  if (run.output) {
+    if (open.error) {
+      const err = document.createElement("div");
+      err.className = "run-err";
+      err.textContent = open.error;
+      body.append(err);
+    } else if (open.text == null) {
+      const wait = document.createElement("div");
+      wait.className = "meta";
+      wait.textContent = "Loading output…";
+      body.append(wait);
+    } else if (open.full) {
+      const pre = document.createElement("pre");
+      pre.className = "run-log";
+      pre.textContent = open.text + (open.truncated ? "\n\n[cut at 400 KB]" : "");
+      body.append(pre);
+    } else {
+      const main = outputMain(open.text);
+      const md = document.createElement("div");
+      md.className = "assistant";
+      md.innerHTML = renderMarkdown(main || "(No output)");
+      body.append(md);
+    }
+  } else if (!run.error) {
+    const none = document.createElement("div");
+    none.className = "meta";
+    none.textContent = "No saved output for this run.";
+    body.append(none);
+  }
+  const actions = document.createElement("div");
+  actions.className = "run-actions";
+  if (run.output && open.text != null) {
+    const full = document.createElement("button");
+    full.type = "button";
+    full.className = "textbtn";
+    full.textContent = open.full ? "Show result" : "Full log";
+    full.addEventListener("click", () => { open.full = !open.full; renderJob(); });
+    actions.append(full);
+  }
+  if (run.session) {
+    const go = document.createElement("button");
+    go.type = "button";
+    go.className = "textbtn";
+    go.textContent = "Open transcript";
+    go.addEventListener("click", () => openSession(run.session, (job.name || "Cron") + " · " + clockTime(stampOf(run.at)), true, job.profile || "default"));
+    actions.append(go);
+  }
+  if (actions.childNodes.length) body.append(actions);
+  return body;
+}
+
+async function loadRunOutput(job, run, key) {
+  const open = CRON.open[key];
+  try {
+    const res = await api("/phone-api/cron/output?profile=" + encodeURIComponent(job.profile || "default") +
+      "&job=" + encodeURIComponent(job.id) + "&file=" + encodeURIComponent(run.output));
+    if (!res.ok) throw new Error(await errorMessage(res));
+    const data = await res.json();
+    open.text = String(data.text || "");
+    open.truncated = Boolean(data.truncated);
+  } catch (e) {
+    if (e.status === 401) return showKey(e.message);
+    open.error = e.message || "Could not load the output";
+  }
+  if (CRON.job === job && CRON.open[key] === open) renderJob();
+}
+
+function renderJob() {
+  const job = CRON.job;
+  if (!job) return;
+  const root = $("job-body");
+  const scroll = root.scrollTop;
+  root.textContent = "";
+  root.append(jobSummary(job));
+  const head = document.createElement("div");
+  head.className = "bucket";
+  head.textContent = "Runs";
+  root.append(head);
+  if (CRON.runs == null || CRON.runs.error) {
+    const note = document.createElement("div");
+    note.className = CRON.runs ? "empty note-line" : "meta run-note";
+    note.textContent = CRON.runs ? CRON.runs.error : "Loading runs…";
+    root.append(note);
+  } else if (!CRON.runs.length) {
+    const none = document.createElement("div");
+    none.className = "meta run-note";
+    none.textContent = "No runs yet.";
+    root.append(none);
+  } else {
+    CRON.runs.forEach((run, i) => root.append(runRow(job, run, i)));
+  }
+  root.scrollTop = scroll;
 }
 
 // "#s=<id>" for the default profile, "#s=<id>&p=<profile>" for another.
@@ -1338,6 +1901,11 @@ async function openSession(id, title, push, profile) {
   }
   paintRunChrome();
   watchOther(true);
+  const draft = takeDraft(id);
+  if (draft && !$("draft").value) {
+    $("draft").value = draft;
+    $("draft").dispatchEvent(new Event("input"));
+  }
   // No auto-focus: opening a session should not raise the keyboard (and its
   // viewport jump) before you ask for it. Tap the box to type.
 }
@@ -2980,6 +3548,7 @@ $("rename-form").addEventListener("submit", (event) => {
 });
 
 function showList() {
+  DRAWER.mode = "sessions";
   dropDoneRuns(null);
   show("list-screen");
   renderSessions();
@@ -2990,24 +3559,50 @@ $("back").addEventListener("click", () => {
   toggleMenu(false);
   $("draft").blur();
   if (history.state && history.state.id) history.back();
-  else {
+  else if (DRAWER.mode === "cron") {
+    history.pushState({ cron: true }, "", "#cron");
+    showCron();
+  } else {
     history.pushState({}, "", location.pathname);
     showList();
   }
 });
 
 window.addEventListener("popstate", () => {
+  const cron = cronHashTarget();
+  if (cron) return void openCronTarget(cron);
   const target = hashTarget();
   if (target) openSession(target.id, "Hermes", false, target.profile);
   else showList();
 });
 
-$("view-btn").addEventListener("click", () => toggleSheet());
-$("sheet-done").addEventListener("click", () => toggleSheet(false));
-$("view-sheet").addEventListener("click", (event) => {
-  if (event.target === $("view-sheet")) toggleSheet(false);
+for (const button of document.querySelectorAll("[data-drawer]")) {
+  button.addEventListener("click", () => toggleSheet());
+}
+for (const button of document.querySelectorAll(".drawer-mode")) {
+  button.addEventListener("click", () => pickMode(button.dataset.mode));
+}
+$("drawer").addEventListener("click", (event) => {
+  if (event.target === $("drawer")) toggleSheet(false);
 });
+// Swipe the drawer left to close it.
+$("drawer").addEventListener("touchstart", (event) => {
+  DRAWER.touchX = event.touches.length === 1 ? event.touches[0].clientX : null;
+}, { passive: true });
+$("drawer").addEventListener("touchend", (event) => {
+  const start = DRAWER.touchX;
+  DRAWER.touchX = null;
+  if (start != null && event.changedTouches[0] && start - event.changedTouches[0].clientX > 60) toggleSheet(false);
+}, { passive: true });
 $("profile-chip").addEventListener("click", () => toggleSheet(true));
+$("cron-refresh").addEventListener("click", () => loadCron());
+$("job-back").addEventListener("click", () => {
+  if (history.state && history.state.job) history.back();
+  else {
+    history.replaceState({ cron: true }, "", "#cron");
+    showCron();
+  }
+});
 
 $("composer").addEventListener("submit", (event) => {
   event.preventDefault();
@@ -3031,7 +3626,9 @@ $("draft").addEventListener("input", () => {
 });
 
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState !== "visible") return;
+  if (document.visibilityState !== "visible") return lockNow();
+  if (resumeLocked()) return;
+  autoUnlock();
   const run = liveRun(state.sessionId);
   if (run && !run.streamOpen) renderLive();
   if (!$("list-screen").hidden && authed()) loadSessions(true).catch(() => {});
@@ -3073,6 +3670,14 @@ async function boot() {
   if (AUTH.faceid) {
     setKey("");
     $("key-btn").textContent = "Lock";
+    // Every app open asks for Face ID, even when the Mac still holds a live
+    // unlock (a logout sent while iOS froze the page may not have landed).
+    if (AUTH.unlocked && !LOCK.opened) {
+      // Awaited: its cookie-clearing reply must not land after the new unlock's cookie.
+      try { await fetch(apiBase() + "/phone-api/auth/logout", { method: "POST" }); } catch (e) {}
+      AUTH.unlocked = false;
+    }
+    LOCK.opened = true;
     if (!AUTH.unlocked) return showLock("");
   } else if (AUTH.setupOpen && !SETUP.skipped) {
     return showSetup();
@@ -3095,7 +3700,9 @@ async function boot() {
   catch (e) { if (e.status === 401) return showKey(e.message); }
   // The link wins; otherwise reopen the newest reply still running.
   const last = resumed[resumed.length - 1];
+  const cron = cronHashTarget();
   if (target) openSession(target.id, "Hermes", false, target.profile);
+  else if (cron) openCronTarget(cron);
   else if (last) openSession(last.sessionId, last.title, false, last.profile);
   else show("list-screen");
 }

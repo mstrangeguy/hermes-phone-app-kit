@@ -137,7 +137,7 @@ header.bar {
 /* Status dot, after the desktop sidebar: colour tells the states apart;
    only "needs approval" pulses, since it is the one that needs you. */
 .sdot { flex: none; width: 7px; height: 7px; border-radius: 50%; align-self: center; margin-right: -1px; }
-.sdot:not(.dot-approval):not(.dot-working):not(.dot-unread) { display: none; }
+.sdot:not(.dot-approval):not(.dot-working):not(.dot-unread):not(.dot-bad):not(.dot-paused) { display: none; }
 .sdot.dot-working { background: var(--primary); }
 .sdot.dot-approval { background: #f59e0b; animation: sdot-pulse 1.6s ease-in-out infinite; }
 .sdot.dot-unread { background: #3fb950; }
@@ -552,12 +552,6 @@ pre.diff .d-file { color: var(--muted-fg); }
 .profile-chip[hidden] { display: none; }
 .list-actions { display: flex; align-items: center; gap: 4px; padding-right: 8px; }
 .list-actions .new-session { flex: 1; width: auto; margin-right: 0; }
-.view-btn { position: relative; margin: 2px 0 6px; }
-.view-btn.on { color: var(--primary); }
-.view-btn.on::after {
-  content: ""; position: absolute; top: 6px; right: 6px; width: 6px; height: 6px;
-  border-radius: 50%; background: var(--primary);
-}
 button.bucket.group {
   appearance: none; width: 100%; background: none; border: 0; padding: 6px 2px 4px; margin: 8px 0 2px;
   text-align: left; min-height: 32px;
@@ -580,20 +574,39 @@ button.bucket.group::after { order: 3; }
 .tag[hidden] { display: none; }
 .note-line { padding: 10px 10px 4px; font-size: 13px; color: var(--warn); }
 
-/* View sheet: slides up from the bottom over the list. */
-#list-screen { position: relative; }
-.sheet-wrap {
-  position: absolute; inset: 0; z-index: 20; display: flex; flex-direction: column; justify-content: flex-end;
-  background: rgba(1, 4, 9, 0.55);
+/* Side drawer: slides in from the left over any list screen. Sessions or
+   Cron, that view's choices, and Lock. */
+.drawer-wrap {
+  position: absolute; inset: 0; z-index: 30; display: flex;
+  background: rgba(1, 4, 9, 0.55); animation: drawer-dim 0.18s ease-out;
 }
-.sheet-wrap[hidden] { display: none; }
-.sheet {
-  max-height: 82%; display: flex; flex-direction: column; background: var(--popover);
-  border-top: 1px solid var(--border); border-radius: 16px 16px 0 0;
-  padding-bottom: var(--safe-bottom); animation: sheet-up 0.18s ease-out;
+.drawer-wrap[hidden] { display: none; }
+.drawer {
+  width: min(84%, 340px); height: 100%; display: flex; flex-direction: column;
+  background: var(--popover); border-right: 1px solid var(--border);
+  padding: calc(10px + var(--safe-top)) 0 var(--safe-bottom);
+  animation: drawer-in 0.2s ease-out;
 }
-.sheet-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px 6px 16px; }
-.sheet-head .title { font-size: 15px; }
+.drawer-head { display: flex; align-items: center; min-height: 38px; padding: 0 16px; }
+.drawer-modes { display: flex; flex-direction: column; gap: 2px; padding: 4px 8px 6px; border-bottom: 1px solid var(--border); }
+.drawer-mode {
+  appearance: none; text-align: left; border: 0; border-radius: 8px; background: transparent; color: var(--fg);
+  min-height: 42px; padding: 0 10px; font-size: 15px; font-weight: 550;
+}
+.drawer-mode:active { background: var(--muted); }
+.drawer-mode.on { background: color-mix(in srgb, var(--primary) 16%, transparent); color: color-mix(in srgb, var(--primary) 70%, var(--fg)); }
+.drawer .sheet-body { flex: 1; min-height: 0; padding-top: 4px; }
+.drawer-foot { padding: 8px 12px 10px; border-top: 1px solid var(--border); }
+.drawer-foot .textbtn { width: 100%; min-height: 40px; border: 1px solid var(--border); color: var(--muted-fg); }
+.sheet-note { margin: 14px 0 0; font-size: 12.5px; color: var(--muted-fg); }
+.nav-btn { position: relative; margin-left: -6px; color: var(--fg); }
+.nav-btn.on::after {
+  content: ""; position: absolute; top: 6px; right: 5px; width: 6px; height: 6px;
+  border-radius: 50%; background: var(--primary);
+}
+.wordmark-btn { appearance: none; border: 0; background: none; color: var(--fg); padding: 8px 4px; margin-left: -4px; }
+@keyframes drawer-in { from { transform: translateX(-100%); } }
+@keyframes drawer-dim { from { opacity: 0; } }
 .sheet-body { overflow: auto; padding: 0 16px 16px; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
 .sheet-sec { margin: 10px 0 0; }
 .sheet-sec h3 {
@@ -607,6 +620,42 @@ button.bucket.group::after { order: 3; }
 }
 .chip.on { background: var(--primary); border-color: transparent; color: var(--primary-fg); font-weight: 600; }
 .sheet-reset { margin-top: 16px; width: 100%; min-height: 40px; border: 1px solid var(--border); color: var(--muted-fg); }
-@keyframes sheet-up { from { transform: translateY(24px); opacity: 0; } }
-@media (prefers-reduced-motion: reduce) { .sheet { animation: none; } button.bucket.group .chev { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .drawer, .drawer-wrap { animation: none; } button.bucket.group .chev { transition: none; } }
+
+/* Cron: job list (same rows as sessions) and a job page with its runs. */
+#cron-screen { background: var(--sidebar); }
+#cron-screen .list { padding-top: 6px; }
+.cron-title { color: var(--muted-fg); font-weight: 500; }
+.sdot.dot-bad { background: var(--danger); }
+.sdot.dot-paused { background: var(--muted-fg); }
+#job-screen { background: var(--bg); }
+#job-screen header.bar { background: var(--bg); border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent); }
+.job-body { padding-bottom: 24px; }
+.job-sum { border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; background: var(--sidebar); }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 12px; margin: 0; font-size: 13.5px; }
+.kv dt { color: var(--muted-fg); }
+.kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.kv dd.bad { color: var(--danger); }
+.job-prompt { margin-top: 10px; font-size: 13px; }
+.job-prompt summary { color: var(--muted-fg); cursor: pointer; }
+.job-prompt pre, .run-log {
+  white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+  background: var(--sidebar); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; margin: 8px 0 0;
+  max-height: 60vh; overflow: auto;
+}
+.run-note { padding: 6px 2px; font-size: 13px; }
+.run { border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent); }
+.run-head {
+  appearance: none; width: 100%; display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 6px 2px;
+  border: 0; background: none; color: var(--fg); text-align: left; font-size: 14px;
+}
+.run-head:active { background: var(--muted); }
+.run-when { flex: none; font-weight: 500; }
+.run-meta { flex: 1; min-width: 0; color: var(--muted-fg); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.run-head .chev { flex: none; color: var(--muted-fg); transition: transform 0.15s; }
+.run-head[aria-expanded="true"] .chev { transform: rotate(90deg); }
+.run-body { padding: 2px 2px 12px; }
+.run-err { color: var(--danger); font-size: 13px; margin: 0 0 8px; overflow-wrap: anywhere; }
+.run-actions { display: flex; gap: 8px; margin-top: 10px; }
+.run-actions .textbtn { border: 1px solid var(--border); font-size: 13px; min-height: 34px; }
 #chat-screen header.bar .tag { margin-right: 2px; }
