@@ -5,7 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <meta name="theme-color" content="#0d1117">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<!-- No apple-mobile-web-app-status-bar-style. "black-translucent" drew the page
+     under the status bar, and iOS 26/27 lays a system blur over that strip and
+     the top of the header. Without the tag the page starts below the status bar,
+     which iOS paints in the page colour (theme-color, set per screen in app.js).
+     iOS reads this once, when the icon is added: delete and re-add the Home
+     Screen icon after changing it. -->
 <meta name="apple-mobile-web-app-title" content="Hermes">
 <title>Hermes</title>
 <link rel="manifest" href="manifest.webmanifest">

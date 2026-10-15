@@ -449,10 +449,14 @@ function setKey(value) {
   } catch (e) {}
 }
 
+// The status bar takes the colour of the header under it, so it reads as one band.
+const BAR_COLOR = { "list-screen": "#010409" };
 function show(id) {
   for (const screen of ["key-screen", "lock-screen", "setup-screen", "list-screen", "chat-screen"]) {
     $(screen).hidden = screen !== id;
   }
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute("content", BAR_COLOR[id] || "#0d1117");
 }
 
 // Fit the app to the visible area when the keyboard is up, so the composer
