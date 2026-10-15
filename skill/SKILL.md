@@ -15,7 +15,7 @@ A phone chat page for this Hermes, served by a small proxy (`serve.py`) on `127.
 
 ## Installing
 
-The user runs `./install.sh` himself in a Terminal window on the Mac. You may clone the repo (`git clone https://github.com/mstrangeguy/hermes-phone-app-kit.git ~/.hermes/phone-chat`; it is private, so the user must have accepted the invite and be signed in to GitHub), then tell him the command. Do not run `install.sh` from your own terminal tool: it has no keyboard, so every question silently takes its default and the user agrees to nothing. Do not answer its questions for him. Afterwards you can explain a question, read `serve.log`, or fix a failed step.
+The user runs `./install.sh` himself in a Terminal window on the Mac. You may clone the repo (`git clone https://github.com/mstrangeguy/hermes-phone-app-kit.git ~/.hermes/phone-chat`), then tell him the command. Do not run `install.sh` from your own terminal tool: it has no keyboard, so every question silently takes its default and the user agrees to nothing. Do not answer its questions for him. Afterwards you can explain a question, read `serve.log`, or fix a failed step.
 
 Run Python for this app with `scripts/py`, never a hardcoded interpreter path. It finds Hermes's own Python on older installs (`hermes-agent/venv`) and on current ones (managed by Hermes's package manager), which a Hermes update can move.
 

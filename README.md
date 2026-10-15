@@ -18,8 +18,6 @@ cd ~/.hermes/phone-chat
 ./install.sh
 ```
 
-The repo is private: accept the GitHub invite first, and be signed in to GitHub on this Mac (`gh auth login`, or a browser prompt on the first clone).
-
 Run `./install.sh` yourself, in a Terminal window on the Mac. It asks questions only you should answer, and it prints a Face ID setup code for your phone. Your Hermes can clone the repo, explain a question, or fix a failure, but if Hermes runs the installer itself it cannot answer the questions and takes every default.
 
 Do not clone into iCloud Drive, Dropbox or OneDrive. Sync damages git folders, and the installer refuses those paths.
@@ -125,4 +123,4 @@ scripts/py -I tests/plugin_test.py "$PWD" "$(mktemp -d)"
 | `tests/` | Offline tests. None of them contacts a real phone, bot or Home Assistant. |
 | `skill/SKILL.md` | Instructions for your Hermes agent to maintain this app. |
 
-Third-party code: marked (MIT) and DOMPurify (Apache-2.0 / MPL-2.0), licences in `page/vendor/`. The icon is Hermes's own (MIT), licence in `page/icon-LICENSE`.
+This app is MIT licensed (see `LICENSE`). Third-party code: marked (MIT) and DOMPurify (Apache-2.0 / MPL-2.0), licences in `page/vendor/`. The icon is Hermes's own (MIT), licence in `page/icon-LICENSE`.

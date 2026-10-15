@@ -34,11 +34,11 @@ DEFAULT_KEY = "default-key-0123456789"
 HA_KEY = "ha-key-abcdefghijklmnop"
 home = os.path.join(work, "home")
 profiles = os.path.join(home, "profiles")
-for name in ("ha-updates", "nokey", "short", "Bad.Name"):
+for name in ("work", "nokey", "short", "Bad.Name"):
     os.makedirs(os.path.join(profiles, name), exist_ok=True)
 with open(os.path.join(home, ".env"), "w") as handle:
     handle.write("API_SERVER_KEY=%s\n" % DEFAULT_KEY)
-with open(os.path.join(profiles, "ha-updates", ".env"), "w") as handle:
+with open(os.path.join(profiles, "work", ".env"), "w") as handle:
     handle.write("# x\nexport API_SERVER_KEY='%s'\n" % HA_KEY)
 with open(os.path.join(profiles, "short", ".env"), "w") as handle:
     handle.write("API_SERVER_KEY=tooshort\n")
@@ -85,7 +85,7 @@ make_state(os.path.join(home, "state.db"), [
     ("archroot", "desktop", "compressed", now - 900, now - 700, "", None, 1, None, "compression"),
     ("archtip", "desktop", "tip", now - 600, now - 600, "", None, 1, "archroot", None),
 ], [("d1", live, now - 5, now + 300)])
-make_state(os.path.join(profiles, "ha-updates", "state.db"), [
+make_state(os.path.join(profiles, "work", "state.db"), [
     ("h1", "cron", "nightly", now - 100, now - 50, "", None, 0, None, None),
 ], [("h1", live, now - 3, now + 300)])
 pconn = sqlite3.connect(os.path.join(home, "projects.db"))
@@ -99,7 +99,7 @@ pconn.executemany("INSERT INTO project_folders VALUES (?,?)", [
     ("p1", proj_dir), ("p2", os.path.join(proj_dir, "sub")), ("p3", os.path.dirname(proj_dir))])
 pconn.commit()
 pconn.close()
-for name in ("ha-updates",):
+for name in ("work",):
     pending = os.path.join(profiles, name, "phone-approvals", "pending")
     os.makedirs(pending, exist_ok=True)
     os.makedirs(os.path.join(profiles, name, "phone-approvals", "decisions"), exist_ok=True)
@@ -182,50 +182,50 @@ def last_auth():
 
 
 # --- Which profiles ---------------------------------------------------------
-check("served: default + keyed profile only", serve.served_profiles() == ["default", "ha-updates"])
-check("profile key read (export, quotes)", serve.profile_key("ha-updates") == HA_KEY)
+check("served: default + keyed profile only", serve.served_profiles() == ["default", "work"])
+check("profile key read (export, quotes)", serve.profile_key("work") == HA_KEY)
 check("short key not usable", serve.profile_key("short") == "")
 check("bad profile name has no home", serve.profile_home("../x") is None and serve.profile_key("../x") == "")
-check("split /p/ path", serve.split_profile("/p/ha-updates/api/sessions") == ("ha-updates", "/api/sessions"))
+check("split /p/ path", serve.split_profile("/p/work/api/sessions") == ("work", "/api/sessions"))
 check("split plain path", serve.split_profile("/api/sessions") == ("default", "/api/sessions"))
 check("split unknown", serve.split_profile("/p/nokey/api/sessions")[0] is None)
 check("split /p/default refused", serve.split_profile("/p/default/api/sessions")[0] is None)
 
 status, body = call("GET", "/phone-api/profiles")
-check("profiles endpoint", status == 200 and json.loads(body)["profiles"] == ["default", "ha-updates"])
+check("profiles endpoint", status == 200 and json.loads(body)["profiles"] == ["default", "work"])
 check("profiles endpoint needs the key", call("GET", "/phone-api/profiles", key="wrong")[0] == 401)
 
 # --- Forwarding, API-key mode -----------------------------------------------
 status, _ = call("GET", "/api/sessions?limit=1")
 check("default forwarded as is", status == 200 and seen[-1].startswith("GET /api/sessions?limit=1 ")
       and last_auth() == "Bearer " + DEFAULT_KEY)
-status, _ = call("GET", "/p/ha-updates/api/sessions?limit=1")
+status, _ = call("GET", "/p/work/api/sessions?limit=1")
 check("profile forwarded with its own key", status == 200 and
-      seen[-1].startswith("GET /p/ha-updates/api/sessions?limit=1 ") and last_auth() == "Bearer " + HA_KEY)
+      seen[-1].startswith("GET /p/work/api/sessions?limit=1 ") and last_auth() == "Bearer " + HA_KEY)
 check("default key never sent to a profile", DEFAULT_KEY not in seen[-1])
 count = len(seen)
-check("profile refused with wrong key", call("GET", "/p/ha-updates/api/sessions", key="wrong")[0] == 401)
-check("profile refused with no key", call("GET", "/p/ha-updates/api/sessions", key="")[0] == 401)
-check("phone cannot send the profile key itself", call("GET", "/p/ha-updates/api/sessions", key=HA_KEY)[0] == 401)
+check("profile refused with wrong key", call("GET", "/p/work/api/sessions", key="wrong")[0] == 401)
+check("profile refused with no key", call("GET", "/p/work/api/sessions", key="")[0] == 401)
+check("phone cannot send the profile key itself", call("GET", "/p/work/api/sessions", key=HA_KEY)[0] == 401)
 check("unknown profile 404", call("GET", "/p/nokey/api/sessions")[0] == 404)
 check("path-like profile 404", call("GET", "/p/..%2F..%2Fx/api/sessions")[0] == 404)
 check("nothing forwarded on refusals", len(seen) == count)
-check("phone mount + profile", call("GET", "/phone/p/ha-updates/v1/runs/r1")[0] == 200 and
-      seen[-1].startswith("GET /p/ha-updates/v1/runs/r1 ") and last_auth() == "Bearer " + HA_KEY)
+check("phone mount + profile", call("GET", "/phone/p/work/v1/runs/r1")[0] == 200 and
+      seen[-1].startswith("GET /p/work/v1/runs/r1 ") and last_auth() == "Bearer " + HA_KEY)
 
 # --- Active, busy, meta -------------------------------------------------------
 status, body = call("GET", "/phone-api/active")
 data = json.loads(body)
 check("active merges profiles", status == 200 and set(data["active"]) == {"d1", "h1"})
 check("active entries name the profile", data["active"]["d1"]["profile"] == "default"
-      and data["active"]["h1"]["profile"] == "ha-updates")
+      and data["active"]["h1"]["profile"] == "work")
 check("profile approval listed with profile", [(a["request_id"], a["profile"]) for a in data["approvals"]]
-      == [("h" * 32, "ha-updates")])
+      == [("h" * 32, "work")])
 check("profile approval marks its session", data["active"]["h1"]["state"] == "approval")
 check("approval found in the profile's folder",
-      serve.approval_base("h" * 32) == os.path.join(profiles, "ha-updates", "phone-approvals"))
+      serve.approval_base("h" * 32) == os.path.join(profiles, "work", "phone-approvals"))
 
-status, body = call("GET", "/phone-api/busy?session=h1&profile=ha-updates")
+status, body = call("GET", "/phone-api/busy?session=h1&profile=work")
 check("busy reads the profile's state.db", status == 200 and json.loads(body)["busy"] is True)
 status, body = call("GET", "/phone-api/busy?session=h1")
 check("busy defaults to default profile", status == 200 and json.loads(body)["busy"] is False)
@@ -246,7 +246,7 @@ arch = json.loads(body)["archived"]
 check("archived listed, roots only", [r["id"] for r in arch] == ["archroot", "arch"])
 check("archived row shape", arch[1]["archived"] is True and arch[1]["preview"] == "old question"
       and arch[1]["source"] == "desktop")
-status, body = call("GET", "/phone-api/meta?profile=ha-updates&ids=h1")
+status, body = call("GET", "/phone-api/meta?profile=work&ids=h1")
 check("meta per profile (no projects.db)", status == 200 and json.loads(body)["meta"]["h1"]["project"] == "")
 check("meta unknown profile 404", call("GET", "/phone-api/meta?profile=nokey")[0] == 404)
 check("meta needs the key", call("GET", "/phone-api/meta", key="")[0] == 401)
@@ -257,11 +257,11 @@ faceid.session_valid = lambda token, touch=True: token == "good"
 faceid.cookie_token = lambda lines: "good" if any(b"cookie: s=good" in l.lower() for l in lines) else ""
 faceid.load_config = lambda: {"origin": "https://phone.example"}
 cookie = {"Cookie": "s=good"}
-status, _ = call("GET", "/p/ha-updates/api/sessions", key="", headers=cookie)
+status, _ = call("GET", "/p/work/api/sessions", key="", headers=cookie)
 check("face id: profile gets its key", status == 200 and last_auth() == "Bearer " + HA_KEY)
 status, _ = call("GET", "/api/sessions", key="", headers=cookie)
 check("face id: default gets its key", status == 200 and last_auth() == "Bearer " + DEFAULT_KEY)
-check("face id: locked without cookie", call("GET", "/p/ha-updates/api/sessions", key="")[0] == 401)
+check("face id: locked without cookie", call("GET", "/p/work/api/sessions", key="")[0] == 401)
 check("face id: unknown profile 404", call("GET", "/p/nokey/api/sessions", key="", headers=cookie)[0] == 404)
 status, body = call("GET", "/phone-api/active", key="", headers=cookie)
 check("face id: active works", status == 200 and set(json.loads(body)["active"]) == {"d1", "h1"})
