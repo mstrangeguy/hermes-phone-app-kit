@@ -1,7 +1,7 @@
 const KEY_NAME = "hermes.phone.apiKey";
 const SOURCE = {
   cli: "CLI", tui: "CLI", desktop: "Desktop", api_server: "API",
-  telegram: "Telegram", discord: "Discord", slack: "Slack", cron: "Cron"
+  telegram: "Telegram", discord: "Discord", slack: "Slack", cron: "Cron", oneshot: "One-off"
 };
 const CHOICE = {
   once: "Allow once",
@@ -163,35 +163,81 @@ function fmtDur(seconds) {
   return n < 60 ? n.toFixed(n < 10 ? 1 : 0) + "s" : clock(n * 1000);
 }
 
-function saveRun(run) {
+// Every reply this page started and has not seen finish, so a reload can pick
+// them all up again. One per session at most; replies in different sessions
+// run side by side.
+const RUNS_NAME = "hermes.phone.runs";
+
+function saveRuns() {
   try {
-    if (run && run.runId) {
-      localStorage.setItem(RUN_NAME, JSON.stringify({
-        runId: run.runId, sessionId: run.sessionId, userText: run.userText, title: run.title
-      }));
-    } else {
-      localStorage.removeItem(RUN_NAME);
-    }
+    const list = state.runs.filter((r) => r.runId && !r.done).map((r) => ({
+      runId: r.runId, sessionId: r.sessionId, profile: r.profile, userText: r.userText, title: r.title
+    }));
+    if (list.length) localStorage.setItem(RUNS_NAME, JSON.stringify(list));
+    else localStorage.removeItem(RUNS_NAME);
+    localStorage.removeItem(RUN_NAME);
   } catch (e) {}
 }
 
-function savedRun() {
-  try { return JSON.parse(localStorage.getItem(RUN_NAME) || "null"); }
-  catch (e) { return null; }
+function savedRuns() {
+  const out = [];
+  try {
+    const list = JSON.parse(localStorage.getItem(RUNS_NAME) || "[]");
+    if (Array.isArray(list)) out.push(...list.filter((r) => r && r.runId));
+    // The single run an older version of this page saved.
+    const old = JSON.parse(localStorage.getItem(RUN_NAME) || "null");
+    if (old && old.runId && !out.some((r) => r.runId === old.runId)) out.push(old);
+  } catch (e) {}
+  return out;
 }
 
 const state = {
   sessions: [],
-  offset: 0,
-  hasMore: false,
+  pages: {},
+  meta: {},
+  archived: [],
   sessionId: null,
+  profile: "default",
   title: "Hermes",
   messages: [],
   hasEarlier: false,
   loadingEarlier: false,
   tail: null,
-  run: null
+  runs: []
 };
+
+// The run for a session: the live one, or a finished one still shown there.
+function runFor(sessionId) {
+  if (!sessionId) return null;
+  const list = state.runs.filter((r) => r.sessionId === sessionId);
+  return list.find((r) => !r.done) || list[list.length - 1] || null;
+}
+
+function currentRun() {
+  return runFor(state.sessionId);
+}
+
+function liveRun(sessionId) {
+  const run = runFor(sessionId);
+  return run && !run.done ? run : null;
+}
+
+function tracked(run) {
+  return state.runs.includes(run);
+}
+
+function addRun(run) {
+  if (!tracked(run)) state.runs.push(run);
+}
+
+function dropRun(run) {
+  state.runs = state.runs.filter((r) => r !== run);
+}
+
+// Hermes serves every profile on one listener; a profile's API is under /p/<name>.
+function inProfile(profile, path) {
+  return !profile || profile === "default" ? path : "/p/" + encodeURIComponent(profile) + path;
+}
 
 const $ = (id) => document.getElementById(id);
 
@@ -308,7 +354,7 @@ async function prefetchLogin() {
 
 function showLock(message) {
   AUTH.unlocked = false;
-  if (state.run) state.run = null;
+  state.runs = [];
   show("lock-screen");
   lockError(message);
   prefetchLogin();
@@ -655,15 +701,155 @@ function showKey(message) {
   err.textContent = message || "";
 }
 
+// --- Session list: profiles, grouping, sorting, filters ---------------------
+// After the desktop sidebar's filter menu. The choices are kept on the phone.
+// Profiles come from the Mac (/phone-api/profiles): every profile with its
+// own API key. Projects and archived sessions come from /phone-api/meta,
+// because Hermes's session list has neither.
+const VIEW_NAME = "hermes.phone.view";
+const GROUPS = [["date", "Date"], ["project", "Project"], ["status", "Status"], ["source", "Source"], ["profile", "Profile"]];
+const SORTS = [["updated", "Updated"], ["created", "Created"], ["status", "Status"], ["tokens", "Tokens"], ["cost", "Cost"]];
+const STATUSES = [["approval", "Needs approval"], ["working", "Working"], ["unread", "Unread"], ["idle", "Idle"]];
+const STATUS_RANK = { approval: 0, working: 1, unread: 2, idle: 3 };
+const VIEW_DEFAULT = { profile: "default", group: "date", sort: "updated", status: [], sources: [], archived: false, collapsed: {} };
+const VIEW = loadView();
+const PROFILES = { list: ["default"] };
+const LIST = { seq: 0, note: "" };
+
+function loadView() {
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem(VIEW_NAME) || "{}") || {}; } catch (e) {}
+  const view = Object.assign({}, VIEW_DEFAULT, saved);
+  if (!GROUPS.some(([id]) => id === view.group)) view.group = "date";
+  if (!SORTS.some(([id]) => id === view.sort)) view.sort = "updated";
+  for (const name of ["status", "sources"]) if (!Array.isArray(view[name])) view[name] = [];
+  if (!view.collapsed || typeof view.collapsed !== "object") view.collapsed = {};
+  view.archived = Boolean(view.archived);
+  if (typeof view.profile !== "string" || !view.profile) view.profile = "default";
+  return view;
+}
+
+function saveView() {
+  try { localStorage.setItem(VIEW_NAME, JSON.stringify(VIEW)); } catch (e) {}
+}
+
+function viewChanged() {
+  return VIEW.group !== "date" || VIEW.sort !== "updated" || VIEW.status.length > 0 ||
+    VIEW.sources.length > 0 || VIEW.archived;
+}
+
+function profileLabel(name) {
+  if (!name || name === "default") return "Default";
+  if (name === "all") return "All profiles";
+  return name.split(/[-_]+/).filter(Boolean)
+    .map((w) => w.length <= 2 ? w.toUpperCase() : w[0].toUpperCase() + w.slice(1)).join(" ");
+}
+
+function viewProfiles() {
+  return VIEW.profile === "all" ? PROFILES.list : [VIEW.profile];
+}
+
+async function loadProfiles() {
+  try {
+    const res = await api("/phone-api/profiles");
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data.profiles) && data.profiles.length) PROFILES.list = data.profiles;
+    }
+  } catch (e) {
+    if (e.status === 401) throw e;
+  }
+  if (VIEW.profile !== "all" && !PROFILES.list.includes(VIEW.profile)) VIEW.profile = "default";
+  if (VIEW.group === "profile" && VIEW.profile !== "all") VIEW.group = "date";
+}
+
+function sessionKey(session) {
+  return (session._profile || "default") + ":" + session.id;
+}
+
 async function loadSessions(reset) {
-  if (reset) state.offset = 0;
-  const res = await api("/api/sessions?limit=50&offset=" + state.offset);
-  if (!res.ok) throw new Error(await errorMessage(res));
-  const data = await res.json();
-  const rows = Array.isArray(data.data) ? data.data : [];
-  state.sessions = reset ? rows : state.sessions.concat(rows);
-  state.hasMore = Boolean(data.has_more);
-  state.offset += rows.length;
+  const profiles = viewProfiles();
+  const seq = ++LIST.seq;
+  const pages = reset ? {} : state.pages;
+  const results = await Promise.all(profiles.map(async (profile) => {
+    const page = pages[profile] || { offset: 0, more: true };
+    if (!page.more) return { profile, rows: null };
+    const res = await api(inProfile(profile, "/api/sessions?limit=50&offset=" + page.offset));
+    if (!res.ok) {
+      // One profile down still shows the others.
+      if (profiles.length === 1) throw new Error(await errorMessage(res));
+      return { profile, rows: null, failed: true };
+    }
+    const data = await res.json();
+    return { profile, rows: Array.isArray(data.data) ? data.data : [], more: Boolean(data.has_more) };
+  }));
+  if (seq !== LIST.seq) return;
+  const merged = new Map((reset ? [] : state.sessions).map((s) => [sessionKey(s), s]));
+  const failed = [];
+  for (const r of results) {
+    if (r.failed) failed.push(profileLabel(r.profile));
+    if (!r.rows) continue;
+    const page = pages[r.profile] || { offset: 0 };
+    page.offset += r.rows.length;
+    page.more = r.more;
+    pages[r.profile] = page;
+    for (const row of r.rows) {
+      row._profile = r.profile;
+      merged.set(sessionKey(row), row);
+    }
+  }
+  state.pages = pages;
+  state.sessions = [...merged.values()];
+  LIST.note = failed.length ? "Could not load " + failed.join(", ") + "." : "";
+  await loadMeta(profiles).catch((e) => { if (e.status === 401) throw e; });
+  if (seq !== LIST.seq) return;
+  renderSessions();
+  // The Source choices come from the loaded rows; refresh an open sheet.
+  if (!$("view-sheet").hidden) renderSheet();
+}
+
+function listHasMore() {
+  return viewProfiles().some((p) => state.pages[p] && state.pages[p].more);
+}
+
+// Project names (for "Group by project") and archived sessions, read on the Mac.
+async function loadMeta(profiles) {
+  const wantProjects = VIEW.group === "project";
+  if (!wantProjects && !VIEW.archived) {
+    state.archived = [];
+    return;
+  }
+  const archived = [];
+  await Promise.all(profiles.map(async (profile) => {
+    const ids = wantProjects
+      ? state.sessions.filter((s) => s._profile === profile && !(s.id in state.meta)).map((s) => s.id).slice(0, 200)
+      : [];
+    if (!ids.length && !VIEW.archived) return;
+    const res = await api("/phone-api/meta?profile=" + encodeURIComponent(profile) +
+      "&ids=" + encodeURIComponent(ids.join(",")) + (VIEW.archived ? "&archived=1" : ""));
+    if (!res.ok) return;
+    const data = await res.json();
+    const meta = data.meta && typeof data.meta === "object" ? data.meta : {};
+    for (const id of ids) state.meta[id] = meta[id] || { project: "" };
+    for (const id of Object.keys(meta)) state.meta[id] = meta[id];
+    for (const row of Array.isArray(data.archived) ? data.archived : []) {
+      row._profile = profile;
+      archived.push(row);
+    }
+  }));
+  state.archived = archived;
+}
+
+function refreshMeta() {
+  return loadMeta(viewProfiles()).then(renderSessions).catch((e) => {
+    if (e.status === 401) return showKey(e.message);
+    renderSessions();
+  });
+}
+
+function listError(e) {
+  if (e && e.status === 401) return showKey(e.message);
+  LIST.note = (e && e.message) || "Could not load sessions";
   renderSessions();
 }
 
@@ -687,8 +873,8 @@ function markRead(id) {
 }
 
 function sessionDot(id) {
-  const run = state.run;
-  if (run && run.sessionId === id && !run.done) {
+  const run = liveRun(id);
+  if (run) {
     return run.approvals && run.approvals.length ? "approval" : "working";
   }
   if (DESKTOP.list.some((a) => Array.isArray(a.sessions) && a.sessions.includes(id) && !a.sent)) return "approval";
@@ -738,7 +924,20 @@ function watchActive() {
 }
 
 // Repaint just the dots, without rebuilding the list (keeps scroll and taps).
+// When the view groups, sorts or filters by status, a change of state moves
+// rows, so the list is rebuilt instead (scroll position kept).
+const DOTS = { sig: "" };
 function paintDots() {
+  if (VIEW.group === "status" || VIEW.sort === "status" || VIEW.status.length) {
+    const sig = state.sessions.map((s) => s.id + ":" + sessionDot(s.id)).join(",");
+    if (sig === DOTS.sig) return;
+    DOTS.sig = sig;
+    const list = $("session-list");
+    const top = list.scrollTop;
+    renderSessions();
+    list.scrollTop = top;
+    return;
+  }
   for (const button of document.querySelectorAll("#session-list .session")) {
     paintDot(button, button.dataset.id);
   }
@@ -780,65 +979,334 @@ function sessionButton(session) {
   preview.className = "preview";
   preview.textContent = (session.preview || "").replace(/\s+/g, " ").trim();
   button.append(row);
-  if (preview.textContent) button.append(preview);
-  button.addEventListener("click", () => openSession(session.id, session.title || "New session", true));
+  // In "All profiles", every row from a profile other than Default says which.
+  const profile = session._profile || "default";
+  if (VIEW.profile === "all" && profile !== "default" && VIEW.group !== "profile" || session.archived) {
+    const tags = document.createElement("div");
+    tags.className = "tags";
+    if (VIEW.profile === "all" && profile !== "default" && VIEW.group !== "profile") {
+      const tag = document.createElement("span");
+      tag.className = "tag";
+      tag.textContent = profileLabel(profile);
+      tags.append(tag);
+    }
+    if (session.archived) {
+      const tag = document.createElement("span");
+      tag.className = "tag muted";
+      tag.textContent = "Archived";
+      tags.append(tag);
+    }
+    if (preview.textContent) tags.append(preview);
+    button.append(tags);
+  } else if (preview.textContent) {
+    button.append(preview);
+  }
+  button.addEventListener("click", () => openSession(session.id, session.title || "New session", true, profile));
   return button;
+}
+
+function sessionStatus(session) {
+  return sessionDot(session.id) || "idle";
+}
+
+function sessionCost(session) {
+  const n = Number(session.actual_cost_usd != null ? session.actual_cost_usd : session.estimated_cost_usd);
+  return isFinite(n) ? n : 0;
+}
+
+function sessionTokens(session) {
+  return (Number(session.input_tokens) || 0) + (Number(session.output_tokens) || 0);
+}
+
+// Sort key, highest first; recency (the order Hermes sends) breaks ties.
+function sortValue(session) {
+  switch (VIEW.sort) {
+    case "created": return stampMs(session.started_at);
+    case "tokens": return sessionTokens(session);
+    case "cost": return sessionCost(session);
+    case "status": return -STATUS_RANK[sessionStatus(session)];
+    default: return stampMs(session.last_active || session.started_at);
+  }
+}
+
+function sortSessions(list) {
+  const recent = (s) => stampMs(s.last_active || s.started_at);
+  return list.slice().sort((a, b) => (sortValue(b) - sortValue(a)) || (recent(b) - recent(a)));
+}
+
+function shownSessions() {
+  const archived = VIEW.archived ? state.archived : [];
+  const seen = new Set(state.sessions.map(sessionKey));
+  let list = state.sessions.concat(archived.filter((s) => !seen.has(sessionKey(s))));
+  if (VIEW.status.length) list = list.filter((s) => VIEW.status.includes(sessionStatus(s)));
+  if (VIEW.sources.length) list = list.filter((s) => VIEW.sources.includes(sourceGroup(s.source)));
+  return list;
+}
+
+function sourceGroup(source) {
+  return sourceLabel(source) || "Other";
+}
+
+// [{key, label, sessions}] in the order the groups are shown.
+function groupSessions(list) {
+  const sorted = sortSessions(list);
+  if (VIEW.group === "date") {
+    const groups = [];
+    const pinned = sorted.filter((s) => s.pinned);
+    if (pinned.length) groups.push({ key: "pinned", label: "Pinned", sessions: pinned });
+    // Date headers follow recency even when the rows inside are sorted another way.
+    const byDate = new Map();
+    const order = list.filter((s) => !s.pinned).slice()
+      .sort((a, b) => stampMs(b.last_active || b.started_at) - stampMs(a.last_active || a.started_at));
+    for (const s of order) {
+      const label = bucketLabel(s.last_active || s.started_at) || "Older";
+      if (!byDate.has(label)) byDate.set(label, []);
+    }
+    for (const s of sorted) if (!s.pinned) byDate.get(bucketLabel(s.last_active || s.started_at) || "Older").push(s);
+    for (const [label, sessions] of byDate) groups.push({ key: "date:" + label, label, sessions });
+    return groups;
+  }
+  const keyOf = {
+    project: (s) => (state.meta[s.id] && state.meta[s.id].project) || "",
+    status: (s) => sessionStatus(s),
+    source: (s) => sourceGroup(s.source),
+    profile: (s) => s._profile || "default"
+  }[VIEW.group];
+  const labelOf = {
+    project: (k) => k || "No project",
+    status: (k) => (STATUSES.find(([id]) => id === k) || [k, k])[1],
+    source: (k) => k,
+    profile: (k) => profileLabel(k)
+  }[VIEW.group];
+  const map = new Map();
+  for (const s of sorted) {
+    const k = keyOf(s);
+    if (!map.has(k)) map.set(k, []);
+    map.get(k).push(s);
+  }
+  let keys = [...map.keys()];
+  if (VIEW.group === "status") keys.sort((a, b) => STATUS_RANK[a] - STATUS_RANK[b]);
+  else if (VIEW.group === "profile") keys.sort((a, b) => PROFILES.list.indexOf(a) - PROFILES.list.indexOf(b));
+  else {
+    // Busiest group first (by its newest session); the catch-all group last.
+    const newest = (k) => Math.max(...map.get(k).map((s) => stampMs(s.last_active || s.started_at)));
+    keys.sort((a, b) => (a === "" || a === "Other") - (b === "" || b === "Other") || newest(b) - newest(a));
+  }
+  return keys.map((k) => ({ key: VIEW.group + ":" + k, label: labelOf(k), sessions: map.get(k) }));
+}
+
+function groupHeader(group) {
+  const head = document.createElement("button");
+  head.type = "button";
+  head.className = "bucket group";
+  const closed = Boolean(VIEW.collapsed[group.key]);
+  head.setAttribute("aria-expanded", closed ? "false" : "true");
+  const chev = document.createElement("span");
+  chev.className = "chev";
+  chev.setAttribute("aria-hidden", "true");
+  chev.textContent = "›";
+  const label = document.createElement("span");
+  label.className = "glabel";
+  label.textContent = group.label;
+  const count = document.createElement("span");
+  count.className = "gcount";
+  count.textContent = String(group.sessions.length);
+  head.append(chev, label, count);
+  head.addEventListener("click", () => {
+    if (VIEW.collapsed[group.key]) delete VIEW.collapsed[group.key];
+    else VIEW.collapsed[group.key] = true;
+    saveView();
+    renderSessions();
+  });
+  return head;
+}
+
+function paintListHead() {
+  const chip = $("profile-chip");
+  if (chip) {
+    chip.textContent = profileLabel(VIEW.profile);
+    chip.hidden = PROFILES.list.length < 2 && VIEW.profile === "default";
+  }
+  const btn = $("view-btn");
+  if (btn) btn.classList.toggle("on", viewChanged());
 }
 
 function renderSessions() {
   const root = $("session-list");
+  const scroll = root.scrollTop;
   root.textContent = "";
-  const pinned = state.sessions.filter((s) => s.pinned);
-  const rest = state.sessions.filter((s) => !s.pinned);
-  if (!pinned.length && !rest.length) {
+  paintListHead();
+  if (LIST.note) {
+    const note = document.createElement("div");
+    note.className = "empty note-line";
+    note.textContent = LIST.note;
+    root.appendChild(note);
+  }
+  const list = shownSessions();
+  if (!list.length) {
     const empty = document.createElement("div");
     empty.className = "empty";
-    empty.textContent = "No sessions yet.";
+    empty.textContent = state.sessions.length || state.archived.length ? "Nothing matches these filters." : "No sessions yet.";
     root.appendChild(empty);
   }
-  for (const session of pinned) root.appendChild(sessionButton(session));
-  let labelled = pinned.length > 0;
-  let last = "";
-  for (const session of rest) {
-    const label = bucketLabel(session.last_active || session.started_at);
-    if (labelled && label && label !== last) {
-      const bucket = document.createElement("div");
-      bucket.className = "bucket";
-      bucket.textContent = label;
-      root.appendChild(bucket);
+  const groups = groupSessions(list);
+  // The date view keeps today's look: no header over the first group unless something sits above it.
+  const plainFirst = VIEW.group === "date" && groups.length && groups[0].key !== "pinned";
+  groups.forEach((group, i) => {
+    if (VIEW.group === "date" && i === 0 && plainFirst) {
+      for (const session of group.sessions) root.appendChild(sessionButton(session));
+      return;
     }
-    last = label;
-    labelled = true;
-    root.appendChild(sessionButton(session));
-  }
-  if (state.hasMore) {
+    root.appendChild(groupHeader(group));
+    if (VIEW.collapsed[group.key]) return;
+    for (const session of group.sessions) root.appendChild(sessionButton(session));
+  });
+  if (listHasMore()) {
     const more = document.createElement("button");
     more.type = "button";
     more.className = "more";
     more.textContent = "More";
     more.addEventListener("click", async () => {
       more.disabled = true;
+      more.textContent = "Loading…";
       try { await loadSessions(false); }
-      catch (e) {
-        const note = document.createElement("div");
-        note.className = "empty";
-        note.textContent = e.message || "Could not load sessions";
-        root.appendChild(note);
-      }
+      catch (e) { listError(e); }
     });
     root.appendChild(more);
   }
+  root.scrollTop = scroll;
 }
 
-function hashId() {
+// --- View sheet -------------------------------------------------------------
+function chipRow(options, isOn, onPick) {
+  const row = document.createElement("div");
+  row.className = "chips";
+  for (const [id, label] of options) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "chip" + (isOn(id) ? " on" : "");
+    chip.setAttribute("aria-pressed", isOn(id) ? "true" : "false");
+    chip.textContent = label;
+    chip.addEventListener("click", () => onPick(id));
+    row.append(chip);
+  }
+  return row;
+}
+
+function sheetSection(title, body) {
+  const box = document.createElement("section");
+  box.className = "sheet-sec";
+  const h = document.createElement("h3");
+  h.textContent = title;
+  box.append(h, body);
+  return box;
+}
+
+function toggleIn(list, id) {
+  const i = list.indexOf(id);
+  if (i >= 0) list.splice(i, 1);
+  else list.push(id);
+}
+
+function renderSheet() {
+  const body = $("sheet-body");
+  body.textContent = "";
+  if (PROFILES.list.length > 1) {
+    const options = [["all", "All"]].concat(PROFILES.list.map((p) => [p, profileLabel(p)]));
+    body.append(sheetSection("Profile", chipRow(options, (id) => VIEW.profile === id, (id) => {
+      if (VIEW.profile === id) return;
+      VIEW.profile = id;
+      if (id !== "all" && VIEW.group === "profile") VIEW.group = "date";
+      saveView();
+      renderSheet();
+      state.sessions = [];
+      state.archived = [];
+      LIST.note = "";
+      renderSessions();
+      loadSessions(true).catch(listError);
+    })));
+  }
+  const groups = GROUPS.filter(([id]) => id !== "profile" || VIEW.profile === "all");
+  body.append(sheetSection("Group by", chipRow(groups, (id) => VIEW.group === id, (id) => {
+    VIEW.group = id;
+    saveView();
+    renderSheet();
+    if (id === "project") refreshMeta();
+    else renderSessions();
+  })));
+  body.append(sheetSection("Sort by", chipRow(SORTS, (id) => VIEW.sort === id, (id) => {
+    VIEW.sort = id;
+    saveView();
+    renderSheet();
+    renderSessions();
+  })));
+  body.append(sheetSection("Status", chipRow(STATUSES, (id) => VIEW.status.includes(id), (id) => {
+    toggleIn(VIEW.status, id);
+    saveView();
+    renderSheet();
+    renderSessions();
+  })));
+  const sources = [...new Set(state.sessions.concat(state.archived).map((s) => sourceGroup(s.source)).concat(VIEW.sources))]
+    .sort().map((s) => [s, s]);
+  if (sources.length > 1 || VIEW.sources.length) {
+    body.append(sheetSection("Source", chipRow(sources, (id) => VIEW.sources.includes(id), (id) => {
+      toggleIn(VIEW.sources, id);
+      saveView();
+      renderSheet();
+      renderSessions();
+    })));
+  }
+  body.append(sheetSection("Show", chipRow([["archived", "Archived"]], () => VIEW.archived, () => {
+    VIEW.archived = !VIEW.archived;
+    saveView();
+    renderSheet();
+    refreshMeta();
+  })));
+  const reset = document.createElement("button");
+  reset.type = "button";
+  reset.className = "textbtn sheet-reset";
+  reset.textContent = "Reset view";
+  reset.disabled = !viewChanged() && !Object.keys(VIEW.collapsed).length;
+  reset.addEventListener("click", () => {
+    Object.assign(VIEW, VIEW_DEFAULT, { profile: VIEW.profile, status: [], sources: [], collapsed: {} });
+    saveView();
+    renderSheet();
+    state.archived = [];
+    renderSessions();
+  });
+  body.append(reset);
+}
+
+function toggleSheet(open) {
+  const sheet = $("view-sheet");
+  const showIt = open == null ? sheet.hidden : open;
+  sheet.hidden = !showIt;
+  $("view-btn").setAttribute("aria-expanded", showIt ? "true" : "false");
+  if (showIt) renderSheet();
+}
+
+// "#s=<id>" for the default profile, "#s=<id>&p=<profile>" for another.
+function hashFor(id, profile) {
+  return "#s=" + encodeURIComponent(id) + (profile && profile !== "default" ? "&p=" + encodeURIComponent(profile) : "");
+}
+
+function hashTarget() {
   const hash = location.hash || "";
-  if (!hash.startsWith("#s=")) return "";
-  try { return decodeURIComponent(hash.slice(3)); }
-  catch (e) { return ""; }
+  if (!hash.startsWith("#s=")) return null;
+  const params = new URLSearchParams(hash.slice(1));
+  const id = params.get("s") || "";
+  return id ? { id, profile: params.get("p") || "default" } : null;
 }
 
-async function openSession(id, title, push) {
+// API paths for the open session's profile.
+function here(path) {
+  return inProfile(state.profile, path);
+}
+
+async function openSession(id, title, push, profile) {
+  dropDoneRuns(id);
   state.sessionId = id;
+  state.profile = profile || "default";
   state.title = title || "New session";
   state.messages = [];
   state.hasEarlier = false;
@@ -848,8 +1316,10 @@ async function openSession(id, title, push) {
   if (state.tail && state.tail.sessionId !== id) state.tail = null;
   notice("");
   toggleMenu(false);
+  toggleSheet(false);
   $("chat-title").textContent = state.title;
-  if (push) history.pushState({ id }, "", "#s=" + encodeURIComponent(id));
+  paintChatProfile();
+  if (push) history.pushState({ id, profile: state.profile }, "", hashFor(id, state.profile));
   show("chat-screen");
   $("transcript").textContent = "";
   const status = document.createElement("div");
@@ -864,12 +1334,20 @@ async function openSession(id, title, push) {
   }
   paintRunChrome();
   watchOther(true);
-  $("draft").focus();
+  // No auto-focus: opening a session should not raise the keyboard (and its
+  // viewport jump) before you ask for it. Tap the box to type.
+}
+
+function paintChatProfile() {
+  const tag = $("chat-profile");
+  const other = state.profile && state.profile !== "default";
+  tag.hidden = !other;
+  tag.textContent = other ? profileLabel(state.profile) : "";
 }
 
 function messagesPath(id, offset, size) {
-  return "/api/sessions/" + encodeURIComponent(id) + "/messages?order=latest&limit=" + (size + 1) +
-    (offset ? "&offset=" + offset : "");
+  return here("/api/sessions/" + encodeURIComponent(id) + "/messages?order=latest&limit=" + (size + 1) +
+    (offset ? "&offset=" + offset : ""));
 }
 
 // Rows come back oldest first; a full page plus one means more exist, and the
@@ -894,8 +1372,9 @@ async function reloadMessages(opts) {
   if (data.session_id && data.session_id !== id) {
     moved = true;
     state.sessionId = data.session_id;
-    history.replaceState({ id: state.sessionId }, "", "#s=" + encodeURIComponent(state.sessionId));
-    if (state.run && state.run.openedId === id) state.run.sessionId = data.session_id;
+    history.replaceState({ id: state.sessionId, profile: state.profile }, "", hashFor(state.sessionId, state.profile));
+    for (const run of state.runs) if (run.openedId === id || run.sessionId === id) run.sessionId = data.session_id;
+    saveRuns();
   }
   const page = trimPage(Array.isArray(data.data) ? data.data : [], size);
   const fresh = page.rows;
@@ -906,7 +1385,7 @@ async function reloadMessages(opts) {
   renderTranscript();
   if (quiet) return;
   try {
-    const info = await api("/api/sessions/" + encodeURIComponent(state.sessionId));
+    const info = await api(here("/api/sessions/" + encodeURIComponent(state.sessionId)));
     if (state.sessionId !== id && state.sessionId !== data.session_id) return;
     if (info.ok) {
       const body = await info.json();
@@ -949,7 +1428,7 @@ function historyNode(message, results) {
 }
 
 function runningHere() {
-  return Boolean(state.run && !state.run.done && state.run.sessionId === state.sessionId);
+  return Boolean(liveRun(state.sessionId));
 }
 
 // A user row with any display_kind came from Hermes, not the person typing:
@@ -1137,7 +1616,7 @@ function renderTranscript(opts) {
     shown += 1;
   }
   flush();
-  if (!shown && !(state.run && state.run.sessionId === state.sessionId)) {
+  if (!shown && !currentRun()) {
     const empty = document.createElement("div");
     empty.className = "intro";
     const mark = document.createElement("div");
@@ -1155,10 +1634,9 @@ function renderTranscript(opts) {
 }
 
 function paintDraftHint() {
-  const run = state.run;
-  const here = run && run.sessionId === state.sessionId;
+  const live = liveRun(state.sessionId);
   const hasUser = state.messages.some(realUser);
-  $("draft").placeholder = here ? "Add guidance while it works"
+  $("draft").placeholder = live ? "Add guidance while it works"
     : OTHER.busy ? "Busy in another window"
     : hasUser ? "Send a follow-up" : "Give Hermes a task";
 }
@@ -1346,11 +1824,6 @@ function fillStepBody(body, step) {
   }
 }
 
-function ensureRun(sessionId) {
-  if (state.run && state.run.sessionId === sessionId) return state.run;
-  return null;
-}
-
 function liveContainer() {
   let live = $("live");
   if (!live) {
@@ -1455,7 +1928,7 @@ const OTHER_PLATFORM = { desktop: "the desktop app", cli: "the CLI", tui: "the C
 
 function otherLine() {
   const busy = OTHER.busy;
-  if (!busy || state.run && state.run.sessionId === state.sessionId) return null;
+  if (!busy || liveRun(state.sessionId)) return null;
   if (!OTHER.node) {
     const line = document.createElement("div");
     for (const cls of ["dot", "lbl", "phase-t", "total-t"]) {
@@ -1479,10 +1952,11 @@ function otherLine() {
 async function checkOther() {
   const id = state.sessionId;
   if (!id || OTHER.checking || document.hidden || $("chat-screen").hidden) return;
-  if (state.run && state.run.sessionId === id) { OTHER.busy = null; return; }
+  if (liveRun(id)) { OTHER.busy = null; return; }
   OTHER.checking = true;
   try {
-    const res = await api("/phone-api/busy?session=" + encodeURIComponent(id));
+    const res = await api("/phone-api/busy?session=" + encodeURIComponent(id) +
+      "&profile=" + encodeURIComponent(state.profile || "default"));
     if (!res.ok || state.sessionId !== id) return;
     const data = await res.json();
     if (data.busy == null) return;
@@ -1513,8 +1987,8 @@ function watchOther(on) {
 // status line's timers and the running step's clock.
 setInterval(() => {
   if (OTHER.busy && OTHER.node && OTHER.node.isConnected && !document.hidden) otherLine();
-  const run = state.run;
-  if (!run || run.done || run.sessionId !== state.sessionId || document.hidden) return;
+  const run = liveRun(state.sessionId);
+  if (!run || document.hidden) return;
   if (run._statusNode && run._statusNode.isConnected) statusNode(run);
   for (const block of run.blocks) {
     if (block.kind !== "tool" || block.state !== "running") continue;
@@ -1549,7 +2023,7 @@ function renderLive(rebuilding) {
   const root = $("transcript");
   const live = liveContainer();
   const stick = !rebuilding && nearBottom(root);
-  const run = state.run && state.run.sessionId === state.sessionId ? state.run : null;
+  const run = currentRun();
   const nodes = [];
   if (run) {
     nodes.push(userNode(run));
@@ -1616,25 +2090,30 @@ function renderLiveBlock(block) {
   return stepRow(stepOfBlock(block));
 }
 
+// Replies in other sessions keep running and never lock this one. The banner
+// only points at them: one line, a link per reply (newest first, at most 2).
 function paintRunChrome() {
-  const run = state.run;
-  const here = run && run.sessionId === state.sessionId;
+  const run = liveRun(state.sessionId);
   const other = $("other-run");
   // While this session's reply runs, Send becomes "add guidance" (U3) and Stop sits beside it.
-  $("stop").hidden = !here;
-  $("send").setAttribute("aria-label", here ? "Send guidance" : "Send");
-  $("draft").disabled = Boolean(run) && !here;
-  $("send").disabled = !$("draft").value.trim() || (Boolean(run) && !here) || Boolean(here && run.steering);
+  $("stop").hidden = !run;
+  $("send").setAttribute("aria-label", run ? "Send guidance" : "Send");
+  $("draft").disabled = false;
+  $("send").disabled = !$("draft").value.trim() || Boolean(run && run.steering);
   paintDraftHint();
-  if (run && !here && $("chat-screen").hidden === false) {
+  const elsewhere = state.runs.filter((r) => !r.done && r.sessionId !== state.sessionId);
+  if (elsewhere.length && $("chat-screen").hidden === false) {
     other.hidden = false;
     other.textContent = "";
-    other.append("A reply is still running. ");
-    const jump = document.createElement("button");
-    jump.type = "button";
-    jump.textContent = "Open it";
-    jump.addEventListener("click", () => openSession(run.sessionId, run.title || "Hermes", true));
-    other.append(jump);
+    other.append(elsewhere.length === 1 ? "Also working: " : elsewhere.length + " other replies running: ");
+    elsewhere.slice(-2).reverse().forEach((r, i) => {
+      if (i) other.append(" · ");
+      const jump = document.createElement("button");
+      jump.type = "button";
+      jump.textContent = oneLine(r.title || "Hermes", 28);
+      jump.addEventListener("click", () => openSession(r.sessionId, r.title || "Hermes", true, r.profile));
+      other.append(jump);
+    });
   } else {
     other.hidden = true;
     other.textContent = "";
@@ -1653,9 +2132,11 @@ const ARM_MS = 4000;
 function desktopApprovalsHere() {
   const id = state.sessionId;
   if (!id) return [];
-  const own = state.run && state.run.sessionId === id ? state.run.approvals : [];
+  const mine = liveRun(id);
+  const own = mine ? mine.approvals : [];
   return DESKTOP.list.filter((a) =>
     Array.isArray(a.sessions) && a.sessions.includes(id) &&
+    (a.profile || "default") === (state.profile || "default") &&
     !own.some((o) => o.request_id && o.request_id === a.request_id));
 }
 
@@ -1686,8 +2167,8 @@ function pick(obj, names) {
 function renderApprovals() {
   const root = $("approvals");
   root.textContent = "";
-  const run = state.run;
-  if (run && run.sessionId === state.sessionId) {
+  const run = liveRun(state.sessionId);
+  if (run) {
     for (const approval of run.approvals) root.append(approvalCard(run, approval));
   }
   for (const approval of desktopApprovalsHere()) root.append(approvalCard(null, approval));
@@ -1816,7 +2297,7 @@ async function decide(run, approval, choice, button, assertion) {
   if (approval.request_id) body.request_id = approval.request_id;
   if (assertion) body.assertion = assertion;
   try {
-    const res = await api("/v1/runs/" + encodeURIComponent(run.runId) + "/approval", {
+    const res = await api(inProfile(run.profile, "/v1/runs/" + encodeURIComponent(run.runId) + "/approval"), {
       method: "POST",
       body: JSON.stringify(body)
     });
@@ -1977,14 +2458,14 @@ function onRunEvent(run, event) {
     renderLive();
     paintRunChrome();
   } else if ($("list-screen").hidden === false) {
-    renderSessions();
+    paintDots();
   }
 }
 
 function finishRun(run, event) {
   if (run.done) return;
   run.done = true;
-  saveRun(null);
+  saveRuns();
   const name = event.event || event.status || "";
   // The final answer is also relayed as the last step's text; drop that copy.
   const output = String(event.output || "").trim();
@@ -2002,8 +2483,9 @@ function finishRun(run, event) {
     run.blocks.push({ kind: "note", text: event.error || "The run failed." });
   }
   // Guidance that arrived after the last step was never read. Hermes returns
-  // it; put it back in the box so it can go as the next message.
-  if (event.pending_steer) {
+  // it; put it back in the box so it can go as the next message. Only when
+  // that session is open: the box belongs to whatever session is on screen.
+  if (event.pending_steer && state.sessionId === run.sessionId) {
     const draft = $("draft");
     if (!draft.value.trim()) {
       draft.value = event.pending_steer;
@@ -2018,7 +2500,9 @@ function finishRun(run, event) {
   }
   run.approvals = [];
   const sessionId = run.sessionId;
-  state.run = null;
+  // Finished: drop it, unless its session is open and history does not have
+  // the reply yet; then it stays on screen (done) until history catches up.
+  dropRun(run);
   paintRunChrome();
   if (state.sessionId === sessionId) {
     reloadMessages().then(() => {
@@ -2029,18 +2513,28 @@ function finishRun(run, event) {
         renderLive();
         return;
       }
-      if (run.userText && !historyHasUser(run)) {
-        state.run = run;
+      if (run.userText) {
+        addRun(run);
         renderTranscript();
         paintRunChrome();
       }
     }).catch(() => {
-      state.run = run;
+      addRun(run);
       renderTranscript();
       paintRunChrome();
     });
+  } else {
+    // Finished while you were looking at something else.
+    const set = unreadSet();
+    set.add(sessionId);
+    saveUnread(set);
   }
   if ($("list-screen").hidden === false) loadSessions(true).catch(() => renderSessions());
+}
+
+// A finished run kept for display is cleared once you leave its session.
+function dropDoneRuns(keepId) {
+  state.runs = state.runs.filter((r) => !r.done || r.sessionId === keepId);
 }
 
 async function readStream(run, response) {
@@ -2067,14 +2561,17 @@ async function readStream(run, response) {
   }
 }
 
+// A run off screen is polled less often; its dot and the finish are all that show.
 async function pollRun(run) {
   let failures = 0;
-  while (state.run === run && !run.done) {
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-    if (state.run !== run || run.done || !run.runId) return;
+  while (tracked(run) && !run.done) {
+    const onScreen = state.sessionId === run.sessionId && !$("chat-screen").hidden;
+    await new Promise((resolve) => setTimeout(resolve, onScreen ? 2000 : 5000));
+    if (!tracked(run) || run.done || !run.runId) return;
+    if (document.hidden) continue;
     let res;
     try {
-      res = await api("/v1/runs/" + encodeURIComponent(run.runId));
+      res = await api(inProfile(run.profile, "/v1/runs/" + encodeURIComponent(run.runId)));
     } catch (e) {
       if (e.status === 401) { showKey(e.message); return; }
       failures += 1;
@@ -2082,7 +2579,8 @@ async function pollRun(run) {
         run.blocks.push({ kind: "note", text: "Lost contact with Hermes. The reply may still be running." });
         run.statusText = "";
         run.done = true;
-        state.run = null;
+        dropRun(run);
+        saveRuns();
         keepNotes(run);
         if (state.sessionId === run.sessionId) renderTranscript();
         paintRunChrome();
@@ -2093,7 +2591,8 @@ async function pollRun(run) {
     if (res.status === 404) {
       run.blocks.push({ kind: "note", text: "This reply is no longer tracked. Showing what was saved." });
       run.done = true;
-      state.run = null;
+      dropRun(run);
+      saveRuns();
       keepNotes(run);
       paintRunChrome();
       if (state.sessionId === run.sessionId) reloadMessages().catch(() => renderTranscript());
@@ -2126,7 +2625,7 @@ async function pollRun(run) {
     if (!run.streamOpen && run.polls % 2 === 0 && state.sessionId === run.sessionId && !state.loadingEarlier) {
       try {
         await reloadMessages({ quiet: true });
-        if (state.run !== run || run.done) return;
+        if (!tracked(run) || run.done) return;
         pruneSavedBlocks(run);
       } catch (e) {
         if (e.status === 401) { showKey(e.message); return; }
@@ -2135,6 +2634,8 @@ async function pollRun(run) {
     if (state.sessionId === run.sessionId) {
       renderLive();
       paintRunChrome();
+    } else if (!$("list-screen").hidden) {
+      paintDots();
     }
   }
 }
@@ -2148,15 +2649,15 @@ function keepNotes(run) {
 
 function failStart(run, message) {
   run.done = true;
-  saveRun(null);
   run.blocks.push({ kind: "note", text: message });
   run.statusText = "";
   run.approvals = [];
-  state.run = null;
+  dropRun(run);
+  saveRuns();
   keepNotes(run);
   // Nothing was saved, so put the message back in the box to retry.
   const draft = $("draft");
-  if (run.userText && !draft.value.trim()) {
+  if (run.userText && !draft.value.trim() && state.sessionId === run.sessionId) {
     draft.value = run.userText;
     draft.dispatchEvent(new Event("input"));
   }
@@ -2166,10 +2667,12 @@ function failStart(run, message) {
 
 async function sendMessage(text) {
   const sessionId = state.sessionId;
-  if (!sessionId || state.run) return;
+  if (!sessionId || liveRun(sessionId)) return;
+  dropDoneRuns(null);
   const run = {
     sessionId,
     openedId: sessionId,
+    profile: state.profile || "default",
     title: state.title,
     runId: "",
     userText: text,
@@ -2183,7 +2686,7 @@ async function sendMessage(text) {
     streamOpen: false,
     sawBytes: false
   };
-  state.run = run;
+  addRun(run);
   state.tail = null;
   $("draft").value = "";
   $("draft").style.height = "auto";
@@ -2191,14 +2694,14 @@ async function sendMessage(text) {
   paintRunChrome();
   let res;
   try {
-    res = await api("/v1/runs", {
+    res = await api(inProfile(run.profile, "/v1/runs"), {
       method: "POST",
       headers: { "Idempotency-Key": crypto.randomUUID() },
       body: JSON.stringify({ input: text, session_id: sessionId })
     });
   } catch (e) {
     if (e.status === 401) {
-      state.run = null;
+      dropRun(run);
       paintRunChrome();
       return showKey(e.message);
     }
@@ -2211,7 +2714,7 @@ async function sendMessage(text) {
   }
   const started = await res.json();
   run.runId = started.run_id;
-  saveRun(run);
+  saveRuns();
   if (!run.runId) {
     finishRun(run, { event: "run.failed", error: "Hermes did not return a run." });
     return;
@@ -2219,7 +2722,7 @@ async function sendMessage(text) {
   pollRun(run);
   try {
     run.streamOpen = true;
-    const stream = await api("/v1/runs/" + encodeURIComponent(run.runId) + "/events");
+    const stream = await api(inProfile(run.profile, "/v1/runs/" + encodeURIComponent(run.runId) + "/events"));
     if (!stream.ok) throw new Error(await errorMessage(stream));
     await readStream(run, stream);
   } catch (e) {
@@ -2236,7 +2739,7 @@ async function sendMessage(text) {
 // session's reply finishes: a fork copies the messages and marks the original
 // "branched", and neither should happen under a run that is still writing.
 function sessionBusy() {
-  return Boolean(state.run && state.run.sessionId === state.sessionId);
+  return Boolean(liveRun(state.sessionId));
 }
 
 function toggleMenu(open) {
@@ -2274,7 +2777,7 @@ function menuError(text) {
 
 async function renameSession(title) {
   const id = state.sessionId;
-  const res = await api("/api/sessions/" + encodeURIComponent(id), {
+  const res = await api(here("/api/sessions/" + encodeURIComponent(id)), {
     method: "PATCH",
     body: JSON.stringify({ title })
   });
@@ -2289,7 +2792,7 @@ async function renameSession(title) {
 }
 
 async function forkSession() {
-  const res = await api("/api/sessions/" + encodeURIComponent(state.sessionId) + "/fork", {
+  const res = await api(here("/api/sessions/" + encodeURIComponent(state.sessionId) + "/fork"), {
     method: "POST",
     body: "{}"
   });
@@ -2297,17 +2800,17 @@ async function forkSession() {
   const data = await res.json();
   const fork = data.session || {};
   if (!fork.id) throw new Error("Hermes did not return the new session.");
-  await openSession(fork.id, fork.title || "New session", true);
+  await openSession(fork.id, fork.title || "New session", true, state.profile);
   notice("Forked. You are in the copy; the original is still in the list.");
   loadSessions(true).catch(() => {});
 }
 
 async function deleteSession() {
   const id = state.sessionId;
-  const res = await api("/api/sessions/" + encodeURIComponent(id), { method: "DELETE" });
+  const res = await api(here("/api/sessions/" + encodeURIComponent(id)), { method: "DELETE" });
   if (!res.ok) throw new Error(await errorMessage(res));
-  const saved = savedRun();
-  if (saved && saved.sessionId === id) saveRun(null);
+  state.runs = state.runs.filter((r) => r.sessionId !== id);
+  saveRuns();
   state.sessions = state.sessions.filter((session) => session.id !== id);
   state.sessionId = null;
   state.messages = [];
@@ -2335,12 +2838,12 @@ async function menuAction(button, work) {
 // U3. Hermes queues guidance and hands it to the model after the current tool
 // step, as its own user row. It answers 409 unless the run is "running".
 async function steerRun(text) {
-  const run = state.run;
-  if (!run || run.sessionId !== state.sessionId || !run.runId || run.steering) return;
+  const run = liveRun(state.sessionId);
+  if (!run || !run.runId || run.steering) return;
   run.steering = true;
   paintRunChrome();
   try {
-    const res = await api("/v1/runs/" + encodeURIComponent(run.runId) + "/steer", {
+    const res = await api(inProfile(run.profile, "/v1/runs/" + encodeURIComponent(run.runId) + "/steer"), {
       method: "POST",
       body: JSON.stringify({ input: text })
     });
@@ -2366,11 +2869,12 @@ async function steerRun(text) {
 }
 
 async function stopRun() {
-  const run = state.run;
+  // Stop only ever applies to the reply in the session on screen.
+  const run = liveRun(state.sessionId);
   if (!run || !run.runId) return;
   $("stop").disabled = true;
   try {
-    const res = await api("/v1/runs/" + encodeURIComponent(run.runId) + "/stop", { method: "POST" });
+    const res = await api(inProfile(run.profile, "/v1/runs/" + encodeURIComponent(run.runId) + "/stop"), { method: "POST" });
     if (!res.ok) {
       run.blocks.push({ kind: "note", text: await errorMessage(res) });
       renderLive();
@@ -2394,6 +2898,7 @@ $("key-form").addEventListener("submit", async (event) => {
   setKey(value);
   $("key-input").value = "";
   try {
+    await loadProfiles();
     await loadSessions(true);
     show("list-screen");
   } catch (e) {
@@ -2404,7 +2909,7 @@ $("key-form").addEventListener("submit", async (event) => {
 
 $("forget").addEventListener("click", () => {
   setKey("");
-  state.run = null;
+  state.runs = [];
   showKey("");
 });
 
@@ -2426,14 +2931,16 @@ $("setup-skip").addEventListener("click", () => {
   boot();
 });
 
+// A new session goes to the profile in view; in "All profiles", to Default.
 $("new-chat").addEventListener("click", async () => {
   $("new-chat").disabled = true;
+  const profile = VIEW.profile === "all" ? "default" : VIEW.profile;
   try {
-    const res = await api("/api/sessions", { method: "POST", body: "{}" });
+    const res = await api(inProfile(profile, "/api/sessions"), { method: "POST", body: "{}" });
     if (!res.ok) throw new Error(await errorMessage(res));
     const data = await res.json();
     const session = data.session || {};
-    await openSession(session.id, session.title || "New session", true);
+    await openSession(session.id, session.title || "New session", true, profile);
     loadSessions(true).catch(() => {});
   } catch (e) {
     if (e.status === 401) return showKey(e.message);
@@ -2468,35 +2975,45 @@ $("rename-form").addEventListener("submit", (event) => {
   });
 });
 
+function showList() {
+  dropDoneRuns(null);
+  show("list-screen");
+  renderSessions();
+  loadSessions(true).catch(listError);
+}
+
 $("back").addEventListener("click", () => {
   toggleMenu(false);
+  $("draft").blur();
   if (history.state && history.state.id) history.back();
   else {
     history.pushState({}, "", location.pathname);
-    show("list-screen");
-    loadSessions(true).catch(() => {});
+    showList();
   }
 });
 
 window.addEventListener("popstate", () => {
-  const id = hashId();
-  if (id) openSession(id, "Hermes", false);
-  else {
-    show("list-screen");
-    renderSessions();
-  }
+  const target = hashTarget();
+  if (target) openSession(target.id, "Hermes", false, target.profile);
+  else showList();
 });
+
+$("view-btn").addEventListener("click", () => toggleSheet());
+$("sheet-done").addEventListener("click", () => toggleSheet(false));
+$("view-sheet").addEventListener("click", (event) => {
+  if (event.target === $("view-sheet")) toggleSheet(false);
+});
+$("profile-chip").addEventListener("click", () => toggleSheet(true));
 
 $("composer").addEventListener("submit", (event) => {
   event.preventDefault();
   const text = $("draft").value.trim();
   if (!text) return;
   notice("");
-  if (state.run) {
-    if (state.run.sessionId === state.sessionId) steerRun(text);
-    return;
-  }
-  sendMessage(text);
+  // A reply running in this session takes the text as guidance. One running
+  // anywhere else does not matter: this session sends as normal.
+  if (liveRun(state.sessionId)) steerRun(text);
+  else sendMessage(text);
 });
 
 $("stop").addEventListener("click", stopRun);
@@ -2505,18 +3022,47 @@ $("draft").addEventListener("input", () => {
   const draft = $("draft");
   draft.style.height = "auto";
   draft.style.height = Math.min(draft.scrollHeight, 120) + "px";
-  const run = state.run;
-  $("send").disabled = !draft.value.trim() || Boolean(run && (run.sessionId !== state.sessionId || run.steering));
+  const run = liveRun(state.sessionId);
+  $("send").disabled = !draft.value.trim() || Boolean(run && run.steering);
 });
 
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState !== "visible") return;
-  if (state.run && !state.run.streamOpen && !state.run.done && state.sessionId === state.run.sessionId) {
-    renderLive();
-  }
+  const run = liveRun(state.sessionId);
+  if (run && !run.streamOpen) renderLive();
   if (!$("list-screen").hidden && authed()) loadSessions(true).catch(() => {});
   checkActive();
 });
+
+// Pick up every reply this page started that is still running.
+async function resumeRuns() {
+  const resumed = [];
+  await Promise.all(savedRuns().map(async (saved) => {
+    try {
+      const res = await api(inProfile(saved.profile, "/v1/runs/" + encodeURIComponent(saved.runId)));
+      if (!res.ok) return;
+      const status = await res.json();
+      if (!["queued", "running", "stopping", "waiting_for_approval"].includes(status.status)) return;
+      if (liveRun(saved.sessionId)) return;
+      const run = {
+        sessionId: saved.sessionId, openedId: saved.sessionId, profile: saved.profile || "default",
+        title: saved.title || "Hermes", runId: saved.runId, userText: saved.userText || "",
+        blocks: [], approvals: [], statusText: REPLYING, done: false, streamOpen: false, sawBytes: false,
+        startedAt: status.created_at ? status.created_at * 1000 : Date.now(),
+        phaseSince: status.updated_at ? status.updated_at * 1000 : Date.now(),
+        lastEvent: status.last_event || ""
+      };
+      if (status.status === "waiting_for_approval" && status.approval) addApproval(run, status.approval);
+      addRun(run);
+      resumed.push(run);
+    } catch (e) {
+      if (e.status === 401) throw e;
+    }
+  }));
+  saveRuns();
+  for (const run of resumed) pollRun(run);
+  return resumed;
+}
 
 async function boot() {
   await loadAuth();
@@ -2529,45 +3075,24 @@ async function boot() {
   }
   if (!authed()) return showKey("");
   watchActive();
-  const id = hashId();
+  const target = hashTarget();
   try {
+    await loadProfiles();
     await loadSessions(true);
   } catch (e) {
     if (e.status === 401) return showKey(e.message);
     show("list-screen");
-    $("session-list").textContent = "";
-    const note = document.createElement("div");
-    note.className = "empty";
-    note.textContent = e.message || "Can't reach Hermes from this page.";
-    $("session-list").append(note);
+    LIST.note = e.message || "Can't reach Hermes from this page.";
+    renderSessions();
     return;
   }
-  const saved = savedRun();
-  if (saved && saved.runId) {
-    try {
-      const res = await api("/v1/runs/" + encodeURIComponent(saved.runId));
-      if (res.ok) {
-        const status = await res.json();
-        if (["queued", "running", "stopping", "waiting_for_approval"].includes(status.status)) {
-          const run = {
-            sessionId: saved.sessionId, openedId: saved.sessionId, title: saved.title || "Hermes",
-            runId: saved.runId, userText: saved.userText || "", blocks: [], approvals: [],
-            statusText: REPLYING, done: false, streamOpen: false, sawBytes: false,
-            startedAt: status.created_at ? status.created_at * 1000 : Date.now(),
-            phaseSince: status.updated_at ? status.updated_at * 1000 : Date.now(),
-            lastEvent: status.last_event || ""
-          };
-          state.run = run;
-          if (status.status === "waiting_for_approval" && status.approval) addApproval(run, status.approval);
-          pollRun(run);
-          openSession(saved.sessionId, saved.title || "Hermes", false);
-          return;
-        }
-      }
-    } catch (e) {}
-    saveRun(null);
-  }
-  if (id) openSession(id, "Hermes", false);
+  let resumed = [];
+  try { resumed = await resumeRuns(); }
+  catch (e) { if (e.status === 401) return showKey(e.message); }
+  // The link wins; otherwise reopen the newest reply still running.
+  const last = resumed[resumed.length - 1];
+  if (target) openSession(target.id, "Hermes", false, target.profile);
+  else if (last) openSession(last.sessionId, last.title, false, last.profile);
   else show("list-screen");
 }
 
