@@ -7,6 +7,7 @@ this directory. Every other request is streamed to the Hermes API on
 Every request must carry an allowed Tailscale login. Listens on 127.0.0.1 only.
 """
 
+import datetime
 import hmac
 import json
 import os
@@ -902,6 +903,202 @@ def serve_busy(client, target, lines):
     send_response(client, 200, "OK", body, "application/json")
 
 
+# --- Cron jobs (read-only) ----------------------------------------------------
+# Hermes's API server has no cron routes (only the dashboard does, behind its
+# own login), so the proxy reads each served profile's cron files directly:
+# cron/jobs.json, the run log cron/executions.db, and the saved output
+# cron/output/<job>/<YYYY-mm-dd_HH-MM-SS>.md. Nothing here writes or triggers.
+CRON_PATH = "/phone-api/cron"
+CRON_RUNS_PATH = "/phone-api/cron/runs"
+CRON_OUTPUT_PATH = "/phone-api/cron/output"
+JOB_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+OUTPUT_NAME = re.compile(r"^(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})\.md$")
+RUN_SESSION = re.compile(r"_(\d{8})_(\d{6})$")
+OUTPUT_MAX = 400 * 1024
+CRON_RUNS_MAX = 30
+JOB_FIELDS = ("id", "name", "enabled", "state", "paused_at", "paused_reason", "next_run_at", "last_run_at",
+              "last_status", "deliver", "no_agent", "skills", "script", "failure_streak", "created_at", "workdir")
+
+
+def cron_dir(profile):
+    home = profile_home(profile)
+    return os.path.join(home, "cron") if home else None
+
+
+def clip(value, limit):
+    return value[:limit] if isinstance(value, str) else None
+
+
+def cron_jobs(profile):
+    """The profile's jobs, without anything the list does not need."""
+    try:
+        with open(os.path.join(cron_dir(profile), "jobs.json"), encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return []
+    jobs = data.get("jobs") if isinstance(data, dict) else data
+    out = []
+    for job in jobs if isinstance(jobs, list) else []:
+        if not isinstance(job, dict) or not JOB_ID.match(str(job.get("id") or "")):
+            continue
+        row = {k: job.get(k) for k in JOB_FIELDS}
+        schedule = job.get("schedule") if isinstance(job.get("schedule"), dict) else {}
+        row["schedule"] = clip(job.get("schedule_display") or schedule.get("display") or schedule.get("expr"), 120)
+        row["schedule_kind"] = clip(schedule.get("kind"), 20)
+        row["last_error"] = clip(job.get("last_error"), 600)
+        row["last_delivery_error"] = clip(job.get("last_delivery_error"), 600)
+        row["prompt"] = clip(job.get("prompt"), 4000)
+        repeat = job.get("repeat") if isinstance(job.get("repeat"), dict) else {}
+        row["runs_completed"] = repeat.get("completed")
+        row["profile"] = profile
+        out.append(row)
+    return out
+
+
+def local_stamp(*parts):
+    """Local wall-clock parts (as Hermes names its files) -> epoch seconds."""
+    try:
+        return time.mktime(tuple(int(p) for p in parts) + (0, 0, -1))
+    except (ValueError, OverflowError):
+        return None
+
+
+def iso_stamp(text):
+    try:
+        return datetime.datetime.fromisoformat(str(text)).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def cron_runs(profile, job_id, limit=CRON_RUNS_MAX):
+    """Newest first. Each run joins its run-log row, its output file and, for
+    agent jobs, its transcript session, matched by time; any part may be missing."""
+    base = cron_dir(profile)
+    execs = []
+    db = os.path.join(base, "executions.db")
+    if os.path.exists(db):
+        conn = ro_connect(db)
+        try:
+            for row in conn.execute(
+                    "SELECT status, claimed_at, started_at, finished_at, error, delivery_outcome FROM executions "
+                    "WHERE job_id = ? ORDER BY claimed_at DESC LIMIT ?", (job_id, limit)):
+                execs.append({"status": row[0], "started": iso_stamp(row[2] or row[1]),
+                              "finished": iso_stamp(row[3]), "error": clip(row[4], 600), "delivery": row[5]})
+        finally:
+            conn.close()
+    outputs = []
+    try:
+        names = os.listdir(os.path.join(base, "output", job_id))
+    except OSError:
+        names = []
+    for name in names:
+        match = OUTPUT_NAME.match(name)
+        if match:
+            outputs.append((local_stamp(*match.groups()), name))
+    sessions = []
+    state_db = profile_file(profile, "state.db", STATE_DB)
+    if os.path.exists(state_db):
+        conn = ro_connect(state_db)
+        try:
+            prefix = "cron_%s_" % job_id
+            for (sid,) in conn.execute("SELECT id FROM sessions WHERE source = 'cron' AND id >= ? AND id < ? "
+                                       "ORDER BY id DESC LIMIT ?", (prefix, prefix + "\uffff", limit)):
+                match = RUN_SESSION.search(sid)
+                if match:
+                    d, t = match.groups()
+                    sessions.append((local_stamp(d[:4], d[4:6], d[6:], t[:2], t[2:4], t[4:]), sid))
+        finally:
+            conn.close()
+
+    def take(pool, lo, hi):
+        best = None
+        for item in pool:
+            if item[0] is not None and lo <= item[0] <= hi and (best is None or item[0] < best[0]):
+                best = item
+        if best:
+            pool.remove(best)
+        return best
+
+    runs = []
+    for ex in execs:
+        start = ex["started"] or 0
+        end = ex["finished"] or start
+        out = take(outputs, start - 5, end + 120)
+        ses = take(sessions, start - 60, end + 60)
+        ex.update({"output": out[1] if out else None, "session": ses[1] if ses else None, "at": start})
+        runs.append(ex)
+    # Output kept from before the run log existed, or a run the log missed.
+    for stamp, name in outputs:
+        ses = take(sessions, stamp - 3600, stamp + 5)
+        runs.append({"status": None, "started": None, "finished": stamp, "error": None, "delivery": None,
+                     "output": name, "session": ses[1] if ses else None, "at": stamp})
+    for stamp, sid in sessions:
+        runs.append({"status": None, "started": stamp, "finished": None, "error": None, "delivery": None,
+                     "output": None, "session": sid, "at": stamp})
+    runs.sort(key=lambda r: r["at"] or 0, reverse=True)
+    return runs[:limit]
+
+
+def cron_output(profile, job_id, name):
+    """(text, truncated) or None. Only a file named like Hermes's own output."""
+    if not JOB_ID.match(job_id or "") or not OUTPUT_NAME.match(name or ""):
+        return None
+    folder = os.path.realpath(os.path.join(cron_dir(profile), "output", job_id))
+    path = os.path.realpath(os.path.join(folder, name))
+    if os.path.dirname(path) != folder:
+        return None
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(OUTPUT_MAX + 1)
+    except OSError:
+        return None
+    return raw[:OUTPUT_MAX].decode("utf-8", "replace"), len(raw) > OUTPUT_MAX
+
+
+def cron_profiles(client, query):
+    name = (query.get("profile") or ["default"])[0] or "default"
+    if name == "all":
+        return served_profiles()
+    profile = query_profile(client, query)
+    return None if profile is None else [profile]
+
+
+def serve_cron(client, target, lines, local):
+    if key_refused(client, lines):
+        return
+    query = query_of(target)
+    try:
+        if local == CRON_PATH:
+            profiles = cron_profiles(client, query)
+            if profiles is None:
+                return
+            jobs = []
+            for profile in profiles:
+                jobs.extend(cron_jobs(profile))
+            body = {"jobs": jobs}
+        else:
+            profile = query_profile(client, query)
+            if profile is None:
+                return
+            job_id = (query.get("job") or [""])[0]
+            if not JOB_ID.match(job_id):
+                json_error(client, 400, "Bad Request", "bad_job", "Bad job id")
+                return
+            if local == CRON_RUNS_PATH:
+                body = {"runs": cron_runs(profile, job_id)}
+            else:
+                found = cron_output(profile, job_id, (query.get("file") or [""])[0])
+                if found is None:
+                    json_error(client, 404, "Not Found", "no_output", "No such output")
+                    return
+                body = {"text": found[0], "truncated": found[1]}
+    except sqlite3.Error as exc:
+        log("cron read: %s" % type(exc).__name__)
+        json_error(client, 503, "Service Unavailable", "cron_unreadable", "Could not read the cron files")
+        return
+    send_response(client, 200, "OK", json.dumps(body), "application/json")
+
+
 # --- Face ID (passkey) ---------------------------------------------------------
 # faceid.py holds the checks. Before a passkey is enrolled nothing here changes
 # how the page works. After, every API request needs the unlock cookie, the
@@ -910,7 +1107,8 @@ def serve_busy(client, target, lines):
 
 AUTH_PREFIX = "/phone-api/auth/"
 # Answered here, not by Hermes: no key goes out for them.
-LOCAL_API = (BUSY_PATH, ACTIVE_PATH, DECIDE_PATH, PROFILES_PATH, META_PATH)
+LOCAL_API = (BUSY_PATH, ACTIVE_PATH, DECIDE_PATH, PROFILES_PATH, META_PATH,
+             CRON_PATH, CRON_RUNS_PATH, CRON_OUTPUT_PATH)
 # Polls that must not keep a Face ID session awake.
 BACKGROUND = (BUSY_PATH, ACTIVE_PATH, PROFILES_PATH, META_PATH)
 RUN_APPROVAL = re.compile(r"^/v1/runs/([A-Za-z0-9_.:-]{1,128})/approval$")
@@ -1099,6 +1297,9 @@ def handle_client(client, upstream_addr=UPSTREAM):
             return
         if local == META_PATH and method == "GET":
             serve_meta(client, target, lines)
+            return
+        if local in (CRON_PATH, CRON_RUNS_PATH, CRON_OUTPUT_PATH) and method == "GET":
+            serve_cron(client, target, lines, local)
             return
         if local == DECIDE_PATH and method == "POST":
             serve_decide(client, lines, leftover)
