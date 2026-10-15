@@ -540,8 +540,12 @@ function show(id) {
     $(screen).hidden = screen !== id;
   }
   if (id !== "list-screen" && id !== "cron-screen") toggleSheet(false);
+  const color = BAR_COLOR[id] || "#0d1117";
   const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.setAttribute("content", BAR_COLOR[id] || "#0d1117");
+  if (meta) meta.setAttribute("content", color);
+  // iOS 26+ ignores theme-color for an installed app and colours the status
+  // bar from the fixed element at the top of the page: the .app frame.
+  document.documentElement.style.setProperty("--top-bg", color);
 }
 
 // Fit the app to the visible area when the keyboard is up, so the composer

@@ -38,7 +38,7 @@ button { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
   transform: translateY(var(--vvtop, 0px));
   display: flex;
   flex-direction: column;
-  background: var(--bg);
+  background: var(--top-bg, var(--bg));
   overflow: hidden;
 }
 .screen { display: flex; flex-direction: column; min-height: 0; flex: 1; }

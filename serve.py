@@ -1171,6 +1171,7 @@ def serve_auth(client, method, local, lines, leftover):
             json_ok(client, faceid.assertion_options("login", "login"))
         elif name == "login":
             faceid.verify_assertion(data.get("credential"), "login", "login")
+            log("face id: unlocked")
             faceid.drop_session(token)
             json_ok(client, {"ok": True}, [faceid.session_cookie(faceid.new_session())])
         elif name == "approve/options":
