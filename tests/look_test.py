@@ -50,6 +50,8 @@ for bad in ("red", "#12345", "#gggggg", "#4a84fe; color: red", "url(x)", 7):
 check("light accent gets dark text", b"--primary-fg: #161616" in serve.theme_css("#e5a50a"))
 check("dark accent gets white text", b"--primary-fg: #ffffff" in serve.theme_css("#1a237e"))
 check("no accent: no override", b"--primary" not in serve.theme_css(""))
+check("accent colors the header name", b".wordmark-btn { color: var(--primary); }" in serve.theme_css("#e5a50a"))
+check("no accent: header name stays white", b"wordmark" not in serve.theme_css(""))
 
 # --- Served page -------------------------------------------------------------
 listener = socket.socket()

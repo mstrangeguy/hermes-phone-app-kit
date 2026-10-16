@@ -20,6 +20,9 @@ import faceid  # noqa: E402
 
 serve.CONFIG_PATH = os.path.join(work, "config.json")
 serve.LOG_PATH = os.path.join(work, "serve.log")
+# APP_NAME was read from the live config.json at import; pin it so the
+# alert-text checks do not depend on this install's app_name.
+serve.APP_NAME = "Test Name"
 # Never read the live Face ID config: with a passkey enrolled it locks the API-key path.
 faceid.CONFIG_PATH = os.path.join(work, "faceid.json")
 faceid.SETUP_PATH = os.path.join(work, "faceid-setup.json")
@@ -105,7 +108,7 @@ check("second approval request alerts", len(posts) == 2)
 # Run finishes while nobody is watching.
 put("run_wait0", {"status": "completed"})
 serve.check_runs(config, serve.read_runs(db_path), known, alerted)
-check("unwatched finish alerts", len(posts) == 3 and posts[-1]["body"]["message"] == "Hermes finished your reply.")
+check("unwatched finish alerts", len(posts) == 3 and posts[-1]["body"]["message"] == "%s finished your reply." % serve.APP_NAME)
 check("finish is active, not time-sensitive", posts[-1]["body"]["data"]["push"]["interruption-level"] == "active")
 
 # Run that the page is polling: no alerts.
@@ -125,7 +128,7 @@ serve.check_runs(config, serve.read_runs(db_path), known, alerted)
 put("run_stop", {"status": "cancelled"})
 put("run_fail", {"status": "failed"})
 serve.check_runs(config, serve.read_runs(db_path), known, alerted)
-check("cancelled silent, failed alerts", len(posts) == 4 and posts[-1]["body"]["message"] == "Hermes could not finish your reply.")
+check("cancelled silent, failed alerts", len(posts) == 4 and posts[-1]["body"]["message"] == "%s could not finish your reply." % serve.APP_NAME)
 
 # A watched run that the page stops polling becomes unwatched.
 serve._polls["run_late"] = time.monotonic() - serve.WATCHING_WINDOW - 1

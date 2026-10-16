@@ -228,6 +228,8 @@ def theme_css(color):
     r, g, b = (int(hexes[i:i + 2], 16) / 255 for i in (0, 2, 4))
     light = 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.45
     return (":root { --primary: %s; --primary-fg: %s; }\n"
+            # The app name in the list header, so two installs differ at the top.
+            ".wordmark-btn { color: var(--primary); }\n"
             % (color, "#161616" if light else "#ffffff")).encode("ascii")
 
 
