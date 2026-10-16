@@ -48,6 +48,21 @@ SETTINGS = load_settings()
 LISTEN = ("127.0.0.1", int(os.environ.get("PHONE_CHAT_PORT") or SETTINGS.get("port") or 8643))
 UPSTREAM = ("127.0.0.1", int(os.environ.get("PHONE_CHAT_UPSTREAM_PORT") or SETTINGS.get("upstream_port") or 8642))
 HERMES_HOME = os.path.expanduser(SETTINGS.get("hermes_home") or "~/.hermes")
+
+
+def app_look(settings):
+    """Name and accent color for this install, so two installs on one phone
+    (home and work) can be told apart. Bad values fall back to the defaults."""
+    name = settings.get("app_name")
+    name = re.sub(r"[\x00-\x1f\x7f<>&\"']", "", name).strip()[:30] if isinstance(name, str) else ""
+    color = settings.get("accent_color")
+    color = color.strip().lower() if isinstance(color, str) else ""
+    if not re.fullmatch(r"#[0-9a-f]{6}|#[0-9a-f]{3}", color):
+        color = ""
+    return name or "Hermes", color
+
+
+APP_NAME, ACCENT = app_look(SETTINGS)
 # One Tailscale login per line. Tailscale Serve sets Tailscale-User-Login on
 # every tailnet request and strips any copy the client sent, so the header can
 # be trusted here only because this proxy listens on 127.0.0.1. A missing or
@@ -201,7 +216,38 @@ STATIC = {
     "/vendor/purify.min.js": ("page/vendor/purify.min.js", "text/javascript; charset=utf-8"),
     "/manifest.webmanifest": ("page/manifest.webmanifest", "application/manifest+json"),
     "/icon-180.png": ("page/icon-180.png", "image/png"),
+    "/theme.css": (None, "text/css; charset=utf-8"),
 }
+
+
+def theme_css(color):
+    """The accent from config.json as a stylesheet (inline styles are blocked)."""
+    if not color:
+        return b"/* default accent */\n"
+    hexes = color[1:] if len(color) == 7 else "".join(c * 2 for c in color[1:])
+    r, g, b = (int(hexes[i:i + 2], 16) / 255 for i in (0, 2, 4))
+    light = 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.45
+    return (":root { --primary: %s; --primary-fg: %s; }\n"
+            % (color, "#161616" if light else "#ffffff")).encode("ascii")
+
+
+def page_body(path, raw, name, color):
+    """Put this install's name into the page and manifest; iOS takes the Home
+    Screen label from them when the icon is added."""
+    if path == "/theme.css":
+        return theme_css(color)
+    if name == "Hermes":
+        return raw
+    if path == "/":
+        text = raw.decode("utf-8")
+        text = text.replace('content="Hermes"', 'content="%s"' % name)
+        text = text.replace(">Hermes<", ">%s<" % name)
+        return text.encode("utf-8")
+    if path == "/manifest.webmanifest":
+        data = json.loads(raw.decode("utf-8"))
+        data["name"] = data["short_name"] = name
+        return (json.dumps(data, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+    return raw
 
 # No inline script or style is allowed, so injected markup cannot run code.
 # CSSOM writes from app.js (element.style) are not affected by style-src.
@@ -221,8 +267,11 @@ CSP = (
 def serve_page(client, method, target):
     path = mounted_target(target).split("?", 1)[0]
     name, content_type = STATIC[path]
-    with open(os.path.join(ROOT, name), "rb") as handle:
-        body = handle.read()
+    raw = b""
+    if name:
+        with open(os.path.join(ROOT, name), "rb") as handle:
+            raw = handle.read()
+    body = page_body(path, raw, APP_NAME, ACCENT)
     payload = b"" if method == "HEAD" else body
     head = (
         "HTTP/1.1 200 OK\r\n"
@@ -1402,7 +1451,7 @@ def check_desktop(config, approvals, alerted, now=None):
             # The page is on screen and already shows it; never alert for this one later.
             alerted.add(rid)
             continue
-        if send_alert(config, "Hermes is waiting for your approval on the desktop.", True):
+        if send_alert(config, "%s is waiting for your approval on the desktop." % APP_NAME, True):
             alerted.add(rid)
             log("alert sent: desktop approval")
     alerted.intersection_update(open_ids)
@@ -1542,14 +1591,14 @@ def check_runs(config, runs, known, alerted):
             key = "%s:%s" % (run_id, approval.get("request_id") or status.get("updated_at"))
             if key in alerted or watching(run_id):
                 continue
-            if send_alert(config, "Hermes is waiting for your approval.", True):
+            if send_alert(config, "%s is waiting for your approval." % APP_NAME, True):
                 alerted.add(key)
                 log("alert sent: approval")
         elif now in TERMINAL and before is not None and before not in TERMINAL:
             # Stop is almost always the owner's own tap; nothing to report.
             if now == "cancelled" or watching(run_id):
                 continue
-            text = "Hermes finished your reply." if now == "completed" else "Hermes could not finish your reply."
+            text = ("%s finished your reply." if now == "completed" else "%s could not finish your reply.") % APP_NAME
             if send_alert(config, text, False):
                 log("alert sent: %s" % now)
     for run_id in [r for r in known if r not in runs]:

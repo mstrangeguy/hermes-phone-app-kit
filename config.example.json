@@ -1,4 +1,6 @@
 {
+  "app_name": "Hermes",
+  "accent_color": "#4a84fe",
   "port": 8643,
   "upstream_port": 8642,
   "hermes_home": "~/.hermes",

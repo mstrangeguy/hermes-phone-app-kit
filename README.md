@@ -71,6 +71,8 @@ Written by the installer. Edit it by hand to change alerts; the alerts block is 
 
 | Key | Meaning |
 |---|---|
+| `app_name` | Name shown in the app, on the Home Screen icon and in alerts, e.g. `Hermes Work`. Default `Hermes`. Up to 30 characters. Needs a proxy restart, then delete and re-add the Home Screen icon. |
+| `accent_color` | Accent color for buttons and highlights, as `#rrggbb`, e.g. `#e5a50a`. Default blue. Needs a proxy restart. |
 | `port` | Local proxy port. Default 8643. Needs a proxy restart. |
 | `upstream_port` | Hermes API port. Default 8642. |
 | `hermes_home` | Hermes home. Default `~/.hermes`. |
