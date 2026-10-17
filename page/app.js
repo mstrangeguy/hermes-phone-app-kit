@@ -2165,15 +2165,19 @@ function renderTranscript(opts) {
   const root = $("transcript");
   const stick = nearBottom(root);
   const top = root.scrollTop;
-  root.textContent = "";
-  if (state.hasEarlier) root.append(earlierButton());
+  // Build the wanted list, then move only what changed. Clearing the
+  // transcript and re-appending detached every node, and a detached box loses
+  // its scroll: an opened Thought or tool result jumped back to its top on
+  // every 4-second refresh while a reply ran.
+  const wanted = [];
+  if (state.hasEarlier) wanted.push(earlierButton());
   let shown = 0;
   const results = resultsByCall(state.messages);
   const called = callsShown(state.messages);
   let turnKey = "start";
   let edits = [];
   const flush = () => {
-    if (edits.length) root.append(changedFilesCard(turnKey, edits));
+    if (edits.length) wanted.push(changedFilesCard(turnKey, edits));
     edits = [];
   };
   for (const message of state.messages) {
@@ -2188,7 +2192,7 @@ function renderTranscript(opts) {
     if (message.role === "assistant") edits = edits.concat(editsOf(message, results));
     const node = historyNode(message, results);
     if (!node) continue;
-    root.append(node);
+    wanted.push(node);
     shown += 1;
   }
   flush();
@@ -2201,8 +2205,23 @@ function renderTranscript(opts) {
     const hint = document.createElement("p");
     hint.textContent = "Send the task, failing path, or half-formed plan. I'll help turn it into action.";
     empty.append(mark, hint);
-    root.append(empty);
+    wanted.push(empty);
   }
+  // The live reply's container stays last and stays attached.
+  let live = $("live");
+  if (!live) {
+    live = document.createElement("div");
+    live.id = "live";
+  }
+  wanted.push(live);
+  // Drop stale nodes first, so a redrawn message is a single insert and the
+  // nodes after it are not moved (a move detaches them too).
+  const keep = new Set(wanted);
+  for (const child of Array.from(root.children)) if (!keep.has(child)) child.remove();
+  wanted.forEach((node, i) => {
+    if (root.children[i] !== node) root.insertBefore(node, root.children[i] || null);
+  });
+  while (root.children.length > wanted.length) root.lastElementChild.remove();
   renderLive(true);
   if (opts && opts.fromBottom != null) root.scrollTop = root.scrollHeight - opts.fromBottom;
   else root.scrollTop = stick ? root.scrollHeight : top;

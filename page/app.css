@@ -285,7 +285,7 @@ input[type="password"]:focus, input.code:focus, textarea:focus { border-color: v
   opacity: 0.75;
 }
 .tool .meta { margin-left: auto; font-size: 11px; letter-spacing: 0.01em; }
-.tool pre, .think pre { max-height: 180px; color: var(--fg); margin: 4px 0 8px 16px; }
+.tool pre, .think pre { max-height: 180px; color: var(--fg); margin: 4px 0 8px 16px; overscroll-behavior: contain; }
 .tool button {
   appearance: none;
   background: none;
