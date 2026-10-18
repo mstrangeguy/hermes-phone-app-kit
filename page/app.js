@@ -2356,8 +2356,8 @@ const PHONE_INSTRUCTIONS =
   "The user is on the Hermes phone page, which shows pictures. To show an image file from this Mac, " +
   "put MEDIA:/absolute/path/to/file.png on its own line (png, jpg, gif, webp or heic). This replaces the " +
   "API-server note that MEDIA tags show as plain text on the runs endpoint. Pictures and files the user " +
-  "sends are saved on this Mac and listed at the end of the message, one per line, as @image:<path> or " +
-  "@file:<path> (a path with spaces is wrapped in backticks). Pictures also arrive as images. A file's " +
+  "sends are saved on this Mac and listed in the message, one per line, as @file:<path> (before the text) " +
+  "or @image:<path> (after it); a path with spaces is wrapped in backticks. Pictures also arrive as images. A file's " +
   "contents are NOT included: open each @file: path with your file tools (read_file, or the pdf skill " +
   "for PDFs) before answering about it.";
 
@@ -3652,17 +3652,23 @@ async function sendMessage(text) {
     // both apps show the attachments from history. Pictures also go to the
     // model as images; files go by path only, and the turn's instructions tell
     // Hermes to open them (this endpoint does not expand @file: itself).
+    // Order matters to the desktop: it makes chips only of @file: lines that
+    // lead the message (as its composer sends them), while @image: lines count
+    // anywhere (its gateway puts them last). Files first, text, then pictures.
     try {
-      const refs = [];
+      const fileRefs = [];
+      const imageRefs = [];
       const parts = [];
       for (const item of picItems) {
         const path = await uploadPicture(run.profile, item.blob, item.kind, item.name);
-        refs.push("@" + (item.kind === "file" ? "file" : "image") + ":" + refValue(path));
-        if (item.kind !== "file") {
+        if (item.kind === "file") {
+          fileRefs.push("@file:" + refValue(path));
+        } else {
+          imageRefs.push("@image:" + refValue(path));
           parts.push({ type: "image_url", image_url: { url: await blobToDataUrl(item.blob) } });
         }
       }
-      const words = (text || run.userText) + "\n" + refs.join("\n");
+      const words = fileRefs.concat([text || run.userText], imageRefs).join("\n");
       run.userText = words;
       input = parts.length ? [{ role: "user", content: [{ type: "text", text: words }].concat(parts) }] : words;
     } catch (e) {
