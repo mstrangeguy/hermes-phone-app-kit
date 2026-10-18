@@ -561,9 +561,13 @@ function show(id) {
 // transcript also fires visualViewport scroll with a bouncing offsetTop, and
 // following that made the whole app shake. Unchanged values are not rewritten.
 const viewportLast = { h: "", top: "" };
+// Set while the picture viewer is open (see openViewer).
+const VIEWER = { open: false, tapTimer: 0 };
 function syncViewport() {
   const vv = window.visualViewport;
   if (!vv) return;
+  // A page pinch-zoom also shrinks the visual viewport; it is not the keyboard.
+  if (VIEWER.open || vv.scale > 1.01) return;
   const keyboard = vv.height < window.innerHeight - 80;
   const h = Math.round(vv.height) + "px";
   const top = (keyboard ? Math.max(0, Math.round(vv.offsetTop)) : 0) + "px";
@@ -2428,15 +2432,117 @@ function picFigure(source) {
 }
 
 // Full screen. Tap to close; press and hold the picture to save or share it.
+// The viewer zooms the picture itself. Letting iOS zoom the whole page broke
+// the layout: the page reads a pinch as the keyboard (both shrink the visual
+// viewport) and moves the app around. Pinch or double-tap to zoom, drag to
+// pan, tap (unzoomed) or × to close.
 function openViewer(src) {
   const viewer = document.createElement("div");
   viewer.className = "viewer";
   const img = document.createElement("img");
   img.src = src;
   img.alt = "Picture";
-  viewer.append(img);
-  viewer.addEventListener("click", () => viewer.remove());
+  img.draggable = false;
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "viewer-close";
+  close.setAttribute("aria-label", "Close");
+  close.textContent = "×";
+  viewer.append(img, close);
   document.body.append(viewer);
+  VIEWER.open = true;
+
+  const view = { scale: 1, x: 0, y: 0 };
+  const pointers = new Map();
+  let pinch = null;
+  let moved = false;
+  let lastTap = 0;
+  const paint = () => {
+    img.style.transform = "translate(" + view.x + "px, " + view.y + "px) scale(" + view.scale + ")";
+  };
+  // Keep the picture from being dragged entirely off screen.
+  const clamp = () => {
+    const w = img.offsetWidth * view.scale;
+    const h = img.offsetHeight * view.scale;
+    const maxX = Math.max(0, (w - viewer.clientWidth) / 2);
+    const maxY = Math.max(0, (h - viewer.clientHeight) / 2);
+    view.x = Math.min(maxX, Math.max(-maxX, view.x));
+    view.y = Math.min(maxY, Math.max(-maxY, view.y));
+  };
+  const zoomAt = (scale, cx, cy) => {
+    const next = Math.min(6, Math.max(1, scale));
+    const rect = viewer.getBoundingClientRect();
+    const px = cx - rect.left - rect.width / 2;
+    const py = cy - rect.top - rect.height / 2;
+    // Keep the point under the fingers where it is.
+    view.x = px - (px - view.x) * (next / view.scale);
+    view.y = py - (py - view.y) * (next / view.scale);
+    view.scale = next;
+    if (next === 1) { view.x = 0; view.y = 0; }
+    clamp();
+    paint();
+  };
+  const shut = () => {
+    viewer.remove();
+    VIEWER.open = false;
+    syncViewport();
+  };
+
+  viewer.addEventListener("pointerdown", (event) => {
+    if (event.target === close) return;
+    viewer.setPointerCapture(event.pointerId);
+    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    moved = false;
+    if (pointers.size === 2) {
+      const [a, b] = [...pointers.values()];
+      pinch = { dist: Math.hypot(a.x - b.x, a.y - b.y), scale: view.scale };
+    }
+  });
+  viewer.addEventListener("pointermove", (event) => {
+    const prev = pointers.get(event.pointerId);
+    if (!prev) return;
+    const now = { x: event.clientX, y: event.clientY };
+    pointers.set(event.pointerId, now);
+    if (pointers.size === 2 && pinch) {
+      const [a, b] = [...pointers.values()];
+      const dist = Math.hypot(a.x - b.x, a.y - b.y);
+      zoomAt(pinch.scale * dist / (pinch.dist || 1), (a.x + b.x) / 2, (a.y + b.y) / 2);
+      moved = true;
+    } else if (pointers.size === 1 && view.scale > 1) {
+      view.x += now.x - prev.x;
+      view.y += now.y - prev.y;
+      clamp();
+      paint();
+      if (Math.abs(now.x - prev.x) + Math.abs(now.y - prev.y) > 2) moved = true;
+    } else if (Math.abs(now.x - prev.x) + Math.abs(now.y - prev.y) > 6) {
+      moved = true;
+    }
+  });
+  const lift = (event) => {
+    if (!pointers.has(event.pointerId)) return;
+    pointers.delete(event.pointerId);
+    if (pointers.size < 2) pinch = null;
+    if (pointers.size || moved) return;
+    const at = Date.now();
+    if (at - lastTap < 300) {
+      // Double tap: zoom in to 2.5x there, or back out.
+      lastTap = 0;
+      clearTimeout(VIEWER.tapTimer);
+      zoomAt(view.scale > 1 ? 1 : 2.5, event.clientX, event.clientY);
+      return;
+    }
+    lastTap = at;
+    // A single tap closes, but only unzoomed, and only once it is not a double tap.
+    clearTimeout(VIEWER.tapTimer);
+    VIEWER.tapTimer = setTimeout(() => { if (view.scale === 1) shut(); }, 300);
+  };
+  viewer.addEventListener("pointerup", lift);
+  viewer.addEventListener("pointercancel", (event) => { pointers.delete(event.pointerId); pinch = null; });
+  // iOS's own pinch gesture would zoom the page behind the picture.
+  for (const name of ["gesturestart", "gesturechange", "gestureend"]) {
+    viewer.addEventListener(name, (event) => event.preventDefault());
+  }
+  close.addEventListener("click", (event) => { event.stopPropagation(); shut(); });
 }
 
 // Reply text with its picture tags turned into pictures. Tags inside code stay text.
