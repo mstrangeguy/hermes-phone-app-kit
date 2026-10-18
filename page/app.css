@@ -197,6 +197,10 @@ input[type="password"]:focus, input.code:focus, textarea:focus { border-color: v
   /* Bottom padding clears the composer's 36px fade, so the last line ends
      fully lit instead of under the gradient. */
   padding: 12px 14px 48px;
+  /* Vertical only. Anything too wide wraps or scrolls in its own box; one
+     long unbroken line used to let the whole chat slide sideways while
+     scrolling up and down. */
+  overflow-x: hidden;
   overscroll-behavior-y: contain;
   -webkit-overflow-scrolling: touch;
 }
@@ -299,6 +303,9 @@ input[type="password"]:focus, input.code:focus, textarea:focus { border-color: v
   color: var(--muted-fg);
   font-size: 13px;
   padding: 2px 0 6px;
+  /* Hermes notices carry long commands and paths with no spaces. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .approval {
   border: 1px solid #5c4a1f;
@@ -717,7 +724,7 @@ button.bucket.group::after { order: 3; }
 }
 .viewer img {
   max-width: 100%; max-height: 100%; object-fit: contain; transform-origin: center center;
-  will-change: transform; user-select: none; -webkit-user-select: none; -webkit-touch-callout: default;
+  user-select: none; -webkit-user-select: none; -webkit-touch-callout: default;
 }
 .viewer-close {
   position: absolute; top: calc(10px + var(--safe-top)); right: 12px; width: 40px; height: 40px; padding: 0;

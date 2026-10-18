@@ -2334,8 +2334,9 @@ function fileChip(source) {
 // Receiving: a MEDIA:/path tag or a ![](/path) image in a reply is shown as a
 // picture, fetched through /phone-api/media (images only, never logged).
 
-const PIC_SIDE = 1600;
+const PIC_SIDE = 2560;
 const PIC_LIMIT = 4;
+const PIC_MESSAGE_MAX = 9 * 1024 * 1024;
 const PIC_DEFAULT = "What do you see in this picture?";
 const FILE_LIMIT = 25 * 1024 * 1024;
 const FILE_DEFAULT = "Please look at the attached file.";
@@ -2457,13 +2458,26 @@ function openViewer(src) {
   let pinch = null;
   let moved = false;
   let lastTap = 0;
+  // Zoom by resizing the picture, not by a CSS scale: Safari draws a scaled
+  // layer from its 1x bitmap, so a zoomed screenshot came out blurry. A real
+  // size makes it redraw from the full-resolution file.
+  let base = null;
   const paint = () => {
-    img.style.transform = "translate(" + view.x + "px, " + view.y + "px) scale(" + view.scale + ")";
+    if (!base) base = { w: img.offsetWidth, h: img.offsetHeight };
+    if (view.scale === 1) {
+      img.style.width = img.style.height = img.style.maxWidth = img.style.maxHeight = "";
+    } else {
+      img.style.maxWidth = img.style.maxHeight = "none";
+      img.style.width = base.w * view.scale + "px";
+      img.style.height = base.h * view.scale + "px";
+    }
+    img.style.transform = "translate(" + view.x + "px, " + view.y + "px)";
   };
   // Keep the picture from being dragged entirely off screen.
   const clamp = () => {
-    const w = img.offsetWidth * view.scale;
-    const h = img.offsetHeight * view.scale;
+    if (!base) base = { w: img.offsetWidth, h: img.offsetHeight };
+    const w = base.w * view.scale;
+    const h = base.h * view.scale;
     const maxX = Math.max(0, (w - viewer.clientWidth) / 2);
     const maxY = Math.max(0, (h - viewer.clientHeight) / 2);
     view.x = Math.min(maxX, Math.max(-maxX, view.x));
@@ -2585,6 +2599,7 @@ function setReplyHtml(el, text) {
 }
 
 // Shrink on the phone: a camera photo is several MB, and Hermes takes at most 10 MB per message.
+// 2560 px keeps a phone screenshot sharp when zoomed (the model gets its own smaller copy anyway).
 async function shrinkPicture(file) {
   const url = URL.createObjectURL(file);
   try {
@@ -2599,7 +2614,7 @@ async function shrinkPicture(file) {
     canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
     canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
     canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
-    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.85));
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.9));
     if (!blob) throw new Error("That picture could not be prepared.");
     return blob;
   } finally {
@@ -3720,6 +3735,13 @@ async function sendMessage(text) {
   if (!sessionId || liveRun(sessionId)) return;
   dropDoneRuns(null);
   const picItems = readyPics();
+  // Pictures travel inside the message as base64 (a third bigger), and Hermes
+  // refuses a message over 10 MB. Files only travel by path.
+  const inline = picItems.filter((i) => i.kind !== "file").reduce((n, i) => n + i.blob.size, 0);
+  if (inline * 1.37 > PIC_MESSAGE_MAX) {
+    notice("Those pictures are too large to send together. Send them in two messages.");
+    return;
+  }
   if (picItems.length) PICS.items = PICS.items.filter((item) => !picItems.includes(item));
   const run = {
     sessionId,
