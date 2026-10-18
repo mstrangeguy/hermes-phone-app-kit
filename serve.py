@@ -1152,19 +1152,24 @@ def serve_cron(client, target, lines, local):
     send_response(client, 200, "OK", json.dumps(body), "application/json")
 
 
-# --- Pictures -----------------------------------------------------------------
-# A photo sent from the phone is saved under <profile home>/phone-uploads, and
-# its path goes into the message, so Hermes can open the file later and the
-# page can show it again from history. /phone-api/media hands one image file on
-# this Mac to the page: only real images (judged by their first bytes, not the
-# name), only under the home folder or a temp folder, and only through the same
-# login and Face ID gate as every other endpoint. Paths are never logged.
+# --- Pictures and files -------------------------------------------------------
+# Saved where the desktop app saves its own: a picture under <profile
+# home>/images (named phone_<time>_<random>.<type>, type judged by its bytes),
+# any other file under <profile home>/attachments with its own name (-2, -3 if
+# taken). Never overwrites; files are 600. Their paths go into the message, so
+# Hermes can open them and both apps can show them from history.
+# /phone-api/media hands one image file on this Mac to the page: only real
+# images (judged by their first bytes, not the name), only under the home folder
+# or a temp folder, and only through the same login and Face ID gate as every
+# other endpoint. Paths and file names are never logged.
 
 UPLOAD_PATH = "/phone-api/upload"
 MEDIA_PATH = "/phone-api/media"
 UPLOAD_MAX = 15 * 1024 * 1024
+ATTACH_MAX = 25 * 1024 * 1024  # the desktop app's limit
 MEDIA_MAX = 25 * 1024 * 1024
-UPLOAD_DIR = "phone-uploads"
+IMAGE_DIR = "images"
+ATTACH_DIR = "attachments"
 HEIF_BRANDS = (b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx", b"mif1", b"msf1")
 
 
@@ -1244,47 +1249,91 @@ def read_exact(client, leftover, length):
     return bytes(body)
 
 
+def clean_name(raw):
+    """A file name safe to create: last path part, no control characters, no leading dots."""
+    name = os.path.basename(str(raw or "").replace("\\", "/"))
+    name = re.sub(r"[\x00-\x1f\x7f/:]+", "_", name).strip().lstrip(".").strip()
+    if len(name) > 120:
+        stem, dot, ext = name.rpartition(".")
+        name = (stem[:110] + dot + ext[:9]) if dot and len(ext) <= 9 else name[:120]
+    return name or "attachment"
+
+
+def write_new(folder, name, data):
+    """Create folder/name (or name-2, name-3...) without overwriting anything. Mode 600."""
+    if not os.path.isdir(folder):
+        os.makedirs(folder, mode=0o700, exist_ok=True)
+    stem, dot, ext = name.rpartition(".")
+    if not dot or not stem:
+        stem, dot, ext = name, "", ""
+    for n in range(1, 1000):
+        candidate = name if n == 1 else "%s-%d%s%s" % (stem, n, dot, ext)
+        path = os.path.join(folder, candidate)
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            continue
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+        except Exception:
+            with _suppress():
+                os.remove(path)
+            raise
+        return path, candidate
+    raise OSError("no free name")
+
+
 def save_upload(profile, data, kind):
-    folder = os.path.join(profile_home(profile), UPLOAD_DIR)
-    os.makedirs(folder, mode=0o700, exist_ok=True)
-    name = "phone-%s-%s.%s" % (time.strftime("%Y%m%d-%H%M%S"), os.urandom(4).hex(), kind[1])
-    path = os.path.join(folder, name)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(data)
-    return path, name
+    """A picture, into <profile home>/images like the desktop app's own images."""
+    name = "phone_%s_%s.%s" % (time.strftime("%Y%m%d_%H%M%S"), os.urandom(3).hex(), kind[1])
+    return write_new(os.path.join(profile_home(profile), IMAGE_DIR), name, data)
+
+
+def save_attachment(profile, data, name):
+    """Any other file, into <profile home>/attachments under its own name, like the desktop app."""
+    return write_new(os.path.join(profile_home(profile), ATTACH_DIR), clean_name(name), data)
 
 
 def serve_upload(client, target, lines, leftover):
     if key_refused(client, lines):
         return
-    profile = query_profile(client, query_of(target))
+    query = query_of(target)
+    profile = query_profile(client, query)
     if profile is None:
         return
+    as_file = (query.get("kind") or ["image"])[0] == "file"
+    limit = ATTACH_MAX if as_file else UPLOAD_MAX
+    what = "file" if as_file else "photo"
     _fields, _names, length, chunked = header_map(lines)
     if chunked or length is None:
-        json_error(client, 411, "Length Required", "length_required", "Send the photo with a length")
+        json_error(client, 411, "Length Required", "length_required", "Send the %s with a length" % what)
         return
-    if length > UPLOAD_MAX:
-        json_error(client, 413, "Payload Too Large", "too_large", "That photo is too large")
+    if length > limit:
+        json_error(client, 413, "Payload Too Large", "too_large",
+                   "That %s is too large (limit %d MB)" % (what, limit // (1024 * 1024)))
         return
     if not length:
-        json_error(client, 400, "Bad Request", "empty", "No photo was sent")
+        json_error(client, 400, "Bad Request", "empty", "No %s was sent" % what)
         return
     data = read_exact(client, leftover, length)
     kind = image_kind(data[:32])
-    if kind is None:
+    if not as_file and kind is None:
         json_error(client, 415, "Unsupported Media Type", "not_image", "That file is not a picture")
         return
     try:
-        path, name = save_upload(profile, data, kind)
+        if as_file:
+            path, name = save_attachment(profile, data, (query.get("name") or [""])[0])
+        else:
+            path, name = save_upload(profile, data, kind)
     except OSError as exc:
         log("upload: %s" % type(exc).__name__)
-        json_error(client, 507, "Insufficient Storage", "not_saved", "Could not save the photo")
+        json_error(client, 507, "Insufficient Storage", "not_saved", "Could not save the %s" % what)
         return
-    log("upload: %d bytes" % len(data))
-    send_response(client, 201, "Created", json.dumps({"path": path, "name": name, "type": kind[0]}),
-                  "application/json")
+    log("upload: %s, %d bytes" % (what, len(data)))
+    body = {"path": path, "name": name, "size": len(data),
+            "type": kind[0] if kind else "application/octet-stream"}
+    send_response(client, 201, "Created", json.dumps(body), "application/json")
 
 
 # --- Face ID (passkey) ---------------------------------------------------------

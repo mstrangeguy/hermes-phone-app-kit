@@ -332,7 +332,7 @@ html.kb .composer { padding-bottom: 8px; }
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: end;
   gap: 6px;
-  padding: 4px 6px 4px 4px;
+  padding: 4px 6px 4px 2px;
   background: color-mix(in srgb, var(--sidebar) 88%, var(--bg));
   border: 1px solid color-mix(in srgb, var(--primary) 22%, var(--border));
   border-radius: 16px;
@@ -663,11 +663,41 @@ button.bucket.group::after { order: 3; }
 /* Pictures: the add button, the tray of pictures waiting to send, pictures in
    messages, and the full-screen viewer. */
 .attach {
-  width: 40px; min-width: 40px; height: 44px; padding: 0;
+  width: 36px; min-width: 36px; height: 36px; margin: 4px 2px 4px 4px; padding: 0;
   display: flex; align-items: center; justify-content: center;
-  background: none; border: 0; border-radius: 12px; color: var(--muted-fg);
+  background: color-mix(in srgb, var(--fg) 8%, transparent); border: 0; border-radius: 999px; color: var(--fg);
+  transition: transform 0.15s ease;
 }
+.attach.open { transform: rotate(45deg); }
 .attach:disabled { opacity: 0.35; }
+.composer-surface { position: relative; }
+.attach-menu {
+  position: absolute; left: 4px; bottom: calc(100% + 8px); z-index: 40; min-width: 210px;
+  padding: 6px; background: var(--popover); border: 1px solid var(--border); border-radius: 14px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+}
+.attach-menu[hidden] { display: none; }
+.attach-label {
+  padding: 4px 10px 6px; color: var(--muted-fg); font-size: 11px; font-weight: 600;
+  letter-spacing: 0.06em; text-transform: uppercase;
+}
+.attach-menu button {
+  display: flex; align-items: center; gap: 12px; width: 100%; min-height: 44px; padding: 0 10px;
+  background: none; border: 0; border-radius: 10px; color: var(--fg); font-size: 15px; text-align: left;
+}
+.attach-menu button:active { background: color-mix(in srgb, var(--fg) 10%, transparent); }
+.attach-menu svg { color: var(--muted-fg); flex: none; }
+.tray-item.tray-file { width: auto; max-width: 220px; height: 64px; display: flex; align-items: center; padding: 0 30px 0 10px; }
+.files { display: flex; flex-direction: column; gap: 6px; }
+.bubble .bubble-text + .files, .bubble .pics + .files { margin-top: 8px; }
+.file-chip { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 13px; }
+.file-icon {
+  flex: none; width: 22px; height: 26px; border-radius: 4px; border: 1.5px solid var(--muted-fg);
+  background: linear-gradient(var(--muted-fg), var(--muted-fg)) 4px 9px / 10px 1.5px no-repeat,
+              linear-gradient(var(--muted-fg), var(--muted-fg)) 4px 14px / 10px 1.5px no-repeat;
+}
+.file-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); }
+.file-size { flex: none; color: var(--muted-fg); font-size: 12px; }
 .tray { display: flex; gap: 8px; overflow-x: auto; padding: 0 2px 8px; }
 .tray[hidden] { display: none; }
 .tray-item {

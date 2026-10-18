@@ -2252,12 +2252,13 @@ function userBubble(text, steer, sources) {
     wrap.append(label);
   }
   let shown = text;
-  let pics = sources || [];
+  let attached = sources || [];
   if (!steer && !sources) {
     const parsed = picText(text);
-    if (parsed.paths.length) {
+    if (parsed.paths.length || parsed.files.length) {
       shown = parsed.text;
-      pics = parsed.paths.map((path) => ({ path }));
+      attached = parsed.paths.map((path) => ({ kind: "image", path }))
+        .concat(parsed.files.map((path) => ({ kind: "file", name: baseName(path) })));
     }
   }
   const bubble = document.createElement("div");
@@ -2268,31 +2269,86 @@ function userBubble(text, steer, sources) {
     words.textContent = shown;
     bubble.append(words);
   }
+  const pics = attached.filter((s) => s.kind !== "file");
+  const files = attached.filter((s) => s.kind === "file");
   if (pics.length) {
     const row = document.createElement("div");
     row.className = "pics";
     for (const source of pics) row.append(picFigure(source));
     bubble.append(row);
   }
+  if (files.length) {
+    const list = document.createElement("div");
+    list.className = "files";
+    for (const source of files) list.append(fileChip(source));
+    bubble.append(list);
+  }
   wrap.append(bubble);
   return wrap;
 }
 
-// --- Pictures -----------------------------------------------------------------
-// Sending: each picture is shrunk on the phone (longest side PIC_SIDE, JPEG,
-// which also drops the location data in the photo), saved on the Mac through
-// /phone-api/upload, and sent as an image part plus a "[Image attached at:
-// <path>]" line, the same hint Hermes's own apps use. Hermes stores the text
-// with "[screenshot]" in place of each image, so the path line is what lets
-// this page show the picture again from history.
+function baseName(path) {
+  return String(path || "").split("/").filter(Boolean).pop() || "file";
+}
+
+function sizeText(bytes) {
+  if (bytes == null) return "";
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1024 * 1024) return Math.round(bytes / 1024) + " KB";
+  return (bytes / 1024 / 1024).toFixed(1) + " MB";
+}
+
+function fileChip(source) {
+  const chip = document.createElement("div");
+  chip.className = "file-chip";
+  const icon = document.createElement("span");
+  icon.className = "file-icon";
+  icon.setAttribute("aria-hidden", "true");
+  const name = document.createElement("span");
+  name.className = "file-name";
+  name.textContent = source.name || "file";
+  chip.append(icon, name);
+  if (source.size != null) {
+    const size = document.createElement("span");
+    size.className = "file-size";
+    size.textContent = sizeText(source.size);
+    chip.append(size);
+  }
+  return chip;
+}
+
+// --- Pictures and files -------------------------------------------------------
+// The + menu matches the desktop's Attach menu, cut to what a phone has:
+// Photo Library, Take Photo, Files. Saved where the desktop saves its own
+// (<profile>/images, <profile>/attachments) and listed in the message as the
+// desktop's @image:/@file: lines, so either app shows them from history.
+// A picture is shrunk on the phone (longest side PIC_SIDE, JPEG, which also
+// drops its location data) and also sent as an image part. Hermes stores the
+// text with "[screenshot]" in place of each image part; the @image: line is
+// what brings the picture back. A file is sent unchanged (up to FILE_LIMIT).
+// Phone messages from before this used "[Image attached at: <path>]"; those
+// still show.
 // Receiving: a MEDIA:/path tag or a ![](/path) image in a reply is shown as a
 // picture, fetched through /phone-api/media (images only, never logged).
 
 const PIC_SIDE = 1600;
 const PIC_LIMIT = 4;
 const PIC_DEFAULT = "What do you see in this picture?";
+const FILE_LIMIT = 25 * 1024 * 1024;
+const FILE_DEFAULT = "Please look at the attached file.";
+
+function attachWord(items) {
+  const pics = items.filter((i) => i.kind !== "file").length;
+  const files = items.length - pics;
+  if (!files) return pics > 1 ? "the pictures" : "the picture";
+  if (!pics) return files > 1 ? "the files" : "the file";
+  return "the attachments";
+}
+// This page's earlier format (kept so old phone messages still show), and the
+// plain hint lines it adds for the model next to the desktop-style directives.
 const PIC_LINE = /^\[Image attached at: (.+)\]$/;
-const PIC_DESKTOP = /^@image:(?:`([^`]+)`|"([^"]+)"|'([^']+)'|(\S+))$/;
+const FILE_LINE = /^\[File attached at: (.+)\]$/;
+const REF_LINE = /^@(image|file):(?:`([^`]+)`|"([^"]+)"|'([^']+)'|(\S+))$/;
 const PIC_EXT = /\.(png|jpe?g|gif|webp|heic|heif)$/i;
 const PICS = { items: [], pickerOpen: false };
 const MEDIA = new Map();
@@ -2300,23 +2356,38 @@ const MEDIA = new Map();
 const PHONE_INSTRUCTIONS =
   "The user is on the Hermes phone page, which shows pictures. To show an image file from this Mac, " +
   "put MEDIA:/absolute/path/to/file.png on its own line (png, jpg, gif, webp or heic). This replaces the " +
-  "API-server note that MEDIA tags show as plain text on the runs endpoint. Pictures the user sends are " +
-  "saved on this Mac, and each path is in the message as [Image attached at: <path>].";
+  "API-server note that MEDIA tags show as plain text on the runs endpoint. Pictures and files the user " +
+  "sends are saved on this Mac and listed at the end of the message, one per line, as @image:<path> or " +
+  "@file:<path> (a path with spaces is wrapped in backticks). Pictures also arrive as images. A file's " +
+  "contents are NOT included: open each @file: path with your file tools (read_file, or the pdf skill " +
+  "for PDFs) before answering about it.";
 
-// Picture lines in a saved user message: this page's, and the desktop's @image: lines.
+// Same quoting as Hermes's format_reference_value, so @image:/@file: lines read back whole.
+function refValue(path) {
+  if (!/[\s()[\]{}<>"'`]/.test(path)) return path;
+  for (const q of ["`", "\"", "'"]) if (path.indexOf(q) < 0) return q + path + q;
+  return path;
+}
+
+// Attachment lines in a saved user message: the desktop's @image:/@file:
+// directives and this page's hint lines. Each path counts once.
 function picText(text) {
   const paths = [];
+  const files = [];
   const keep = [];
+  const add = (list, path) => { if (path && !paths.includes(path) && !files.includes(path)) list.push(path); };
   for (const line of String(text || "").split("\n")) {
     const clean = line.trim();
-    const mine = clean.match(PIC_LINE);
-    const desktop = mine ? null : clean.match(PIC_DESKTOP);
-    if (mine) paths.push(mine[1].trim());
-    else if (desktop) paths.push(desktop[1] || desktop[2] || desktop[3] || desktop[4]);
+    const pic = clean.match(PIC_LINE);
+    const file = pic ? null : clean.match(FILE_LINE);
+    const ref = pic || file ? null : clean.match(REF_LINE);
+    if (pic) add(paths, pic[1].trim());
+    else if (file) add(files, file[1].trim());
+    else if (ref) add(ref[1] === "image" ? paths : files, ref[2] || ref[3] || ref[4] || ref[5]);
     else keep.push(line);
   }
-  if (!paths.length) return { text: String(text || ""), paths };
-  return { text: keep.filter((line) => line.trim() !== "[screenshot]").join("\n").trim(), paths };
+  if (!paths.length && !files.length) return { text: String(text || ""), paths, files };
+  return { text: keep.filter((line) => line.trim() !== "[screenshot]").join("\n").trim(), paths, files };
 }
 
 function mediaUrl(path) {
@@ -2440,16 +2511,25 @@ function blobToDataUrl(blob) {
   });
 }
 
-async function uploadPicture(profile, blob) {
-  const res = await api("/phone-api/upload?profile=" + encodeURIComponent(profile || "default"), {
+// kind "image" -> <profile>/images; kind "file" -> <profile>/attachments under its own name.
+async function uploadPicture(profile, blob, kind, name) {
+  let url = "/phone-api/upload?profile=" + encodeURIComponent(profile || "default");
+  if (kind === "file") url += "&kind=file&name=" + encodeURIComponent(name || "attachment");
+  const res = await api(url, {
     method: "POST",
-    headers: { "Content-Type": blob.type || "image/jpeg" },
+    headers: { "Content-Type": (kind === "file" ? "application/octet-stream" : blob.type) || "image/jpeg" },
     body: blob
   });
   if (!res.ok) throw new Error(await errorMessage(res));
   const data = await res.json();
-  if (!data.path) throw new Error("The picture was not saved.");
+  if (!data.path) throw new Error("The " + (kind === "file" ? "file" : "picture") + " was not saved.");
   return data.path;
+}
+
+// A tray item is a picture ({kind: "image", blob, url}) or a file
+// ({kind: "file", blob, name, size}). Either is ready once it has a blob.
+function itemReady(item) {
+  return Boolean(item.blob && (item.kind === "file" || item.url));
 }
 
 function paintTray() {
@@ -2458,17 +2538,22 @@ function paintTray() {
   tray.hidden = !PICS.items.length;
   for (const item of PICS.items) {
     const cell = document.createElement("div");
-    cell.className = "tray-item" + (item.url ? "" : " busy");
-    if (item.url) {
-      const img = document.createElement("img");
-      img.src = item.url;
-      img.alt = "Picture to send";
-      cell.append(img);
+    if (item.kind === "file") {
+      cell.className = "tray-item tray-file";
+      cell.append(fileChip({ name: item.name, size: item.size }));
+    } else {
+      cell.className = "tray-item" + (item.url ? "" : " busy");
+      if (item.url) {
+        const img = document.createElement("img");
+        img.src = item.url;
+        img.alt = "Picture to send";
+        cell.append(img);
+      }
     }
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "tray-remove";
-    remove.setAttribute("aria-label", "Remove picture");
+    remove.setAttribute("aria-label", item.kind === "file" ? "Remove " + item.name : "Remove picture");
     remove.textContent = "×";
     remove.addEventListener("click", () => {
       PICS.items = PICS.items.filter((i) => i !== item);
@@ -2488,14 +2573,24 @@ function clearTray(revoke) {
 }
 
 function readyPics() {
-  return PICS.items.filter((item) => item.blob && item.url);
+  return PICS.items.filter(itemReady);
 }
 
 function paintSendState() {
   const run = liveRun(state.sessionId);
-  const busy = PICS.items.some((item) => !item.url);
+  const busy = PICS.items.some((item) => !itemReady(item));
   $("send").disabled = busy || !($("draft").value.trim() || readyPics().length) || Boolean(run && run.steering);
   $("attach").disabled = Boolean(run);
+  if (run) toggleAttachMenu(false);
+}
+
+function toggleAttachMenu(open) {
+  const menu = $("attach-menu");
+  if (!menu) return;
+  const show = open == null ? menu.hidden : open;
+  menu.hidden = !show;
+  $("attach").setAttribute("aria-expanded", show ? "true" : "false");
+  $("attach").classList.toggle("open", show);
 }
 
 // The photo picker or camera can hide the page; that must not lock it.
@@ -2688,7 +2783,7 @@ function userNode(run) {
   if (!run._userNode) {
     // Pictures being sent show from their local preview; after a reload, from the Mac.
     // Without local previews (after a reload) userBubble reads the paths out of the text.
-    const sources = run.picUrls && run.picUrls.length ? run.picUrls.map((url) => ({ url })) : undefined;
+    const sources = run.picSources && run.picSources.length ? run.picSources : undefined;
     run._userNode = userBubble(sources ? run.shownText || "" : run.userText, false, sources);
   }
   return run._userNode;
@@ -3538,13 +3633,15 @@ async function sendMessage(text) {
     title: state.title,
     runId: "",
     // Never empty: it is what marks the run as having a message on screen.
-    userText: text || (picItems.length ? PIC_DEFAULT : ""),
+    userText: text || (!picItems.length ? ""
+      : picItems.some((i) => i.kind !== "file") ? PIC_DEFAULT : FILE_DEFAULT),
     shownText: text,
     picItems: picItems.length ? picItems : null,
-    picUrls: picItems.map((item) => item.url),
+    picSources: picItems.map((item) => item.kind === "file"
+      ? { kind: "file", name: item.name, size: item.size } : { kind: "image", url: item.url }),
     blocks: [],
     approvals: [],
-    statusText: picItems.length ? "Sending the picture" + (picItems.length > 1 ? "s" : "") + "…" : REPLYING,
+    statusText: picItems.length ? "Sending " + attachWord(picItems) + "…" : REPLYING,
     startedAt: Date.now(),
     phaseSince: Date.now(),
     userCountAtSend: state.messages.filter(realUser).length,
@@ -3561,17 +3658,24 @@ async function sendMessage(text) {
   paintRunChrome();
   let input = text;
   if (picItems.length) {
-    // Saved on the Mac first, so the message can carry each picture's path.
+    // Saved on the Mac first, so the message can carry each path. The message
+    // ends with the desktop app's own directive lines (@image:, @file:), so
+    // both apps show the attachments from history. Pictures also go to the
+    // model as images; files go by path only, and the turn's instructions tell
+    // Hermes to open them (this endpoint does not expand @file: itself).
     try {
-      const paths = [];
+      const refs = [];
       const parts = [];
       for (const item of picItems) {
-        paths.push(await uploadPicture(run.profile, item.blob));
-        parts.push({ type: "image_url", image_url: { url: await blobToDataUrl(item.blob) } });
+        const path = await uploadPicture(run.profile, item.blob, item.kind, item.name);
+        refs.push("@" + (item.kind === "file" ? "file" : "image") + ":" + refValue(path));
+        if (item.kind !== "file") {
+          parts.push({ type: "image_url", image_url: { url: await blobToDataUrl(item.blob) } });
+        }
       }
-      const words = (text || PIC_DEFAULT) + "\n\n" + paths.map((p) => "[Image attached at: " + p + "]").join("\n");
+      const words = (text || run.userText) + "\n" + refs.join("\n");
       run.userText = words;
-      input = [{ role: "user", content: [{ type: "text", text: words }].concat(parts) }];
+      input = parts.length ? [{ role: "user", content: [{ type: "text", text: words }].concat(parts) }] : words;
     } catch (e) {
       if (e.status === 401) {
         dropRun(run);
@@ -3928,7 +4032,7 @@ $("composer").addEventListener("submit", (event) => {
   event.preventDefault();
   const text = $("draft").value.trim();
   const running = liveRun(state.sessionId);
-  if (PICS.items.some((item) => !item.url)) return;
+  if (PICS.items.some((item) => !itemReady(item))) return;
   if (!text && (running || !readyPics().length)) return;
   notice("");
   // A reply running in this session takes the text as guidance. One running
@@ -3937,33 +4041,63 @@ $("composer").addEventListener("submit", (event) => {
   else sendMessage(text);
 });
 
-$("attach").addEventListener("click", () => {
+// The plus opens the Attach menu; each row opens one picker.
+$("attach").addEventListener("click", (event) => {
+  event.stopPropagation();
   if (liveRun(state.sessionId)) return;
-  if (PICS.items.length >= PIC_LIMIT) return notice("Up to " + PIC_LIMIT + " pictures per message.");
-  // The picker or camera may hide the page; that is not leaving the app.
-  if (!PICS.pickerOpen) {
-    PICS.pickerOpen = true;
-    LOCK.prompting++;
-    const token = (PICS.token = (PICS.token || 0) + 1);
-    setTimeout(() => { if (PICS.token === token) pickerDone(); }, 5 * 60 * 1000);
-  }
-  $("photo-input").value = "";
-  $("photo-input").click();
+  toggleAttachMenu();
 });
 
-$("photo-input").addEventListener("cancel", pickerDone);
-$("photo-input").addEventListener("change", async () => {
+document.addEventListener("click", (event) => {
+  const menu = $("attach-menu");
+  if (menu && !menu.hidden && !menu.contains(event.target)) toggleAttachMenu(false);
+});
+
+for (const row of document.querySelectorAll("#attach-menu [data-pick]")) {
+  row.addEventListener("click", (event) => {
+    event.stopPropagation();
+    toggleAttachMenu(false);
+    if (liveRun(state.sessionId)) return;
+    if (PICS.items.length >= PIC_LIMIT) return notice("Up to " + PIC_LIMIT + " attachments per message.");
+    // The picker, camera or Files may hide the page; that is not leaving the app.
+    if (!PICS.pickerOpen) {
+      PICS.pickerOpen = true;
+      LOCK.prompting++;
+      const token = (PICS.token = (PICS.token || 0) + 1);
+      setTimeout(() => { if (PICS.token === token) pickerDone(); }, 5 * 60 * 1000);
+    }
+    const input = $(row.dataset.pick);
+    input.value = "";
+    input.click();
+  });
+}
+
+async function addPicked(input, asFile) {
   pickerDone();
-  const files = Array.from($("photo-input").files || []);
-  $("photo-input").value = "";
+  const files = Array.from(input.files || []);
+  input.value = "";
   const room = PIC_LIMIT - PICS.items.length;
-  if (files.length > room) notice("Up to " + PIC_LIMIT + " pictures per message.");
-  const added = files.slice(0, Math.max(0, room)).map((file) => ({ file, blob: null, url: "" }));
+  if (files.length > room) notice("Up to " + PIC_LIMIT + " attachments per message.");
+  const added = [];
+  for (const file of files.slice(0, Math.max(0, room))) {
+    // From Files, a picture still goes as a picture (shrunk, shown, seen by the model).
+    const picture = /^image\//.test(file.type || "") && file.type !== "image/svg+xml";
+    if (asFile && !picture) {
+      if (file.size > FILE_LIMIT) {
+        notice(file.name + " is larger than " + Math.round(FILE_LIMIT / 1024 / 1024) + " MB.");
+        continue;
+      }
+      added.push({ kind: "file", file: null, blob: file, name: file.name || "attachment", size: file.size });
+    } else {
+      added.push({ kind: "image", file, blob: null, url: "" });
+    }
+  }
   if (!added.length) return;
   PICS.items = PICS.items.concat(added);
   paintTray();
   paintSendState();
   for (const item of added) {
+    if (item.kind === "file") continue;
     try {
       item.blob = await shrinkPicture(item.file);
       item.url = URL.createObjectURL(item.blob);
@@ -3975,7 +4109,12 @@ $("photo-input").addEventListener("change", async () => {
     paintTray();
     paintSendState();
   }
-});
+}
+
+for (const [id, asFile] of [["photo-input", false], ["camera-input", false], ["file-input", true]]) {
+  $(id).addEventListener("cancel", pickerDone);
+  $(id).addEventListener("change", () => addPicked($(id), asFile));
+}
 window.addEventListener("focus", pickerDone);
 
 $("stop").addEventListener("click", stopRun);
