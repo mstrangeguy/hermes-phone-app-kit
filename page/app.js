@@ -2318,8 +2318,7 @@ function fileChip(source) {
 }
 
 // --- Pictures and files -------------------------------------------------------
-// The + menu matches the desktop's Attach menu, cut to what a phone has:
-// Photo Library, Take Photo, Files. Saved where the desktop saves its own
+// The + opens iOS's picker (Photo Library, Take Photo, Choose File). Saved where the desktop saves its own
 // (<profile>/images, <profile>/attachments) and listed in the message as the
 // desktop's @image:/@file: lines, so either app shows them from history.
 // A picture is shrunk on the phone (longest side PIC_SIDE, JPEG, which also
@@ -2581,16 +2580,6 @@ function paintSendState() {
   const busy = PICS.items.some((item) => !itemReady(item));
   $("send").disabled = busy || !($("draft").value.trim() || readyPics().length) || Boolean(run && run.steering);
   $("attach").disabled = Boolean(run);
-  if (run) toggleAttachMenu(false);
-}
-
-function toggleAttachMenu(open) {
-  const menu = $("attach-menu");
-  if (!menu) return;
-  const show = open == null ? menu.hidden : open;
-  menu.hidden = !show;
-  $("attach").setAttribute("aria-expanded", show ? "true" : "false");
-  $("attach").classList.toggle("open", show);
 }
 
 // The photo picker or camera can hide the page; that must not lock it.
@@ -4041,36 +4030,23 @@ $("composer").addEventListener("submit", (event) => {
   else sendMessage(text);
 });
 
-// The plus opens the Attach menu; each row opens one picker.
-$("attach").addEventListener("click", (event) => {
-  event.stopPropagation();
+// The + opens iOS's own picker straight away. iOS already offers Photo Library,
+// Take Photo and Choose File there, so a menu of ours in front of it only
+// asked the same question twice. Pictures and other files are told apart by type.
+$("attach").addEventListener("click", () => {
   if (liveRun(state.sessionId)) return;
-  toggleAttachMenu();
+  if (PICS.items.length >= PIC_LIMIT) return notice("Up to " + PIC_LIMIT + " attachments per message.");
+  // The picker, camera or Files may hide the page; that is not leaving the app.
+  if (!PICS.pickerOpen) {
+    PICS.pickerOpen = true;
+    LOCK.prompting++;
+    const token = (PICS.token = (PICS.token || 0) + 1);
+    setTimeout(() => { if (PICS.token === token) pickerDone(); }, 5 * 60 * 1000);
+  }
+  const input = $("file-input");
+  input.value = "";
+  input.click();
 });
-
-document.addEventListener("click", (event) => {
-  const menu = $("attach-menu");
-  if (menu && !menu.hidden && !menu.contains(event.target)) toggleAttachMenu(false);
-});
-
-for (const row of document.querySelectorAll("#attach-menu [data-pick]")) {
-  row.addEventListener("click", (event) => {
-    event.stopPropagation();
-    toggleAttachMenu(false);
-    if (liveRun(state.sessionId)) return;
-    if (PICS.items.length >= PIC_LIMIT) return notice("Up to " + PIC_LIMIT + " attachments per message.");
-    // The picker, camera or Files may hide the page; that is not leaving the app.
-    if (!PICS.pickerOpen) {
-      PICS.pickerOpen = true;
-      LOCK.prompting++;
-      const token = (PICS.token = (PICS.token || 0) + 1);
-      setTimeout(() => { if (PICS.token === token) pickerDone(); }, 5 * 60 * 1000);
-    }
-    const input = $(row.dataset.pick);
-    input.value = "";
-    input.click();
-  });
-}
 
 async function addPicked(input, asFile) {
   pickerDone();
@@ -4111,10 +4087,8 @@ async function addPicked(input, asFile) {
   }
 }
 
-for (const [id, asFile] of [["photo-input", false], ["camera-input", false], ["file-input", true]]) {
-  $(id).addEventListener("cancel", pickerDone);
-  $(id).addEventListener("change", () => addPicked($(id), asFile));
-}
+$("file-input").addEventListener("cancel", pickerDone);
+$("file-input").addEventListener("change", () => addPicked($("file-input"), true));
 window.addEventListener("focus", pickerDone);
 
 $("stop").addEventListener("click", stopRun);

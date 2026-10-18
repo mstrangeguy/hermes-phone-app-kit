@@ -666,27 +666,9 @@ button.bucket.group::after { order: 3; }
   width: 36px; min-width: 36px; height: 36px; margin: 4px 2px 4px 4px; padding: 0;
   display: flex; align-items: center; justify-content: center;
   background: color-mix(in srgb, var(--fg) 8%, transparent); border: 0; border-radius: 999px; color: var(--fg);
-  transition: transform 0.15s ease;
 }
-.attach.open { transform: rotate(45deg); }
 .attach:disabled { opacity: 0.35; }
 .composer-surface { position: relative; }
-.attach-menu {
-  position: absolute; left: 4px; bottom: calc(100% + 8px); z-index: 40; min-width: 210px;
-  padding: 6px; background: var(--popover); border: 1px solid var(--border); border-radius: 14px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
-}
-.attach-menu[hidden] { display: none; }
-.attach-label {
-  padding: 4px 10px 6px; color: var(--muted-fg); font-size: 11px; font-weight: 600;
-  letter-spacing: 0.06em; text-transform: uppercase;
-}
-.attach-menu button {
-  display: flex; align-items: center; gap: 12px; width: 100%; min-height: 44px; padding: 0 10px;
-  background: none; border: 0; border-radius: 10px; color: var(--fg); font-size: 15px; text-align: left;
-}
-.attach-menu button:active { background: color-mix(in srgb, var(--fg) 10%, transparent); }
-.attach-menu svg { color: var(--muted-fg); flex: none; }
 .tray-item.tray-file { width: auto; max-width: 220px; height: 64px; display: flex; align-items: center; padding: 0 30px 0 10px; }
 .files { display: flex; flex-direction: column; gap: 6px; }
 .bubble .bubble-text + .files, .bubble .pics + .files { margin-top: 8px; }

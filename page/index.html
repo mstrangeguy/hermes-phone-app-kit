@@ -170,26 +170,9 @@
       <div id="approvals"></div>
       <div class="tray" id="tray" hidden></div>
       <form id="composer" class="composer-surface">
-        <button class="attach" id="attach" type="button" aria-label="Attach" aria-haspopup="menu" aria-expanded="false">
+        <button class="attach" id="attach" type="button" aria-label="Attach photos or files">
           <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M9 3.5v11M3.5 9h11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
         </button>
-        <div class="attach-menu" id="attach-menu" role="menu" hidden>
-          <div class="attach-label">Attach</div>
-          <button type="button" role="menuitem" data-pick="photo-input">
-            <svg width="18" height="18" viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="4" width="15" height="12" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="7.2" cy="8.3" r="1.5" fill="currentColor"/><path d="M3.5 14.5 8 10.5l3 2.6 2.4-2 3.1 2.9" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
-            <span>Photo Library</span>
-          </button>
-          <button type="button" role="menuitem" data-pick="camera-input">
-            <svg width="18" height="18" viewBox="0 0 20 20" aria-hidden="true"><path d="M3 6.5h3l1.4-2h5.2l1.4 2h3v9H3z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><circle cx="10" cy="10.8" r="2.8" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
-            <span>Take Photo</span>
-          </button>
-          <button type="button" role="menuitem" data-pick="file-input">
-            <svg width="18" height="18" viewBox="0 0 20 20" aria-hidden="true"><path d="M5 2.5h6.5L15.5 6.5V17.5H5z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M11.5 2.5v4h4M7.5 10.5h5M7.5 13.5h5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
-            <span>Files</span>
-          </button>
-        </div>
-        <input type="file" id="photo-input" accept="image/*" multiple hidden>
-        <input type="file" id="camera-input" accept="image/*" capture="environment" hidden>
         <input type="file" id="file-input" multiple hidden>
         <textarea id="draft" rows="1" placeholder="Give Hermes a task" enterkeyhint="enter"></textarea>
         <div class="actions">
