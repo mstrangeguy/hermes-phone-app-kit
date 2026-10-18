@@ -15,8 +15,10 @@ import re
 import signal
 import socket
 import socketserver
+import stat
 import sqlite3
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -257,7 +259,7 @@ CSP = (
     "default-src 'none'; "
     "script-src 'self'; "
     "style-src 'self'; "
-    "img-src 'self' data:; "
+    "img-src 'self' data: blob:; "
     "manifest-src 'self'; "
     "connect-src 'self'; "
     "base-uri 'none'; "
@@ -1150,6 +1152,141 @@ def serve_cron(client, target, lines, local):
     send_response(client, 200, "OK", json.dumps(body), "application/json")
 
 
+# --- Pictures -----------------------------------------------------------------
+# A photo sent from the phone is saved under <profile home>/phone-uploads, and
+# its path goes into the message, so Hermes can open the file later and the
+# page can show it again from history. /phone-api/media hands one image file on
+# this Mac to the page: only real images (judged by their first bytes, not the
+# name), only under the home folder or a temp folder, and only through the same
+# login and Face ID gate as every other endpoint. Paths are never logged.
+
+UPLOAD_PATH = "/phone-api/upload"
+MEDIA_PATH = "/phone-api/media"
+UPLOAD_MAX = 15 * 1024 * 1024
+MEDIA_MAX = 25 * 1024 * 1024
+UPLOAD_DIR = "phone-uploads"
+HEIF_BRANDS = (b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx", b"mif1", b"msf1")
+
+
+def image_kind(head):
+    """(content type, extension) judged from a file's first bytes, or None."""
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png", "png"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg", "jpg"
+    if head[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif", "gif"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp", "webp"
+    if head[4:8] == b"ftyp" and head[8:12] in HEIF_BRANDS:
+        return "image/heic", "heic"
+    return None
+
+
+def media_roots():
+    roots = [os.path.expanduser("~"), "/tmp", "/private/tmp", "/private/var/folders", tempfile.gettempdir()]
+    return [os.path.realpath(r) for r in roots]
+
+
+def under(path, root):
+    return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
+
+
+def media_file(raw):
+    """(real path, content type) of an image this page may show, or None."""
+    if not raw or "\x00" in raw:
+        return None
+    raw = os.path.expanduser(raw)
+    if not os.path.isabs(raw):
+        return None
+    path = os.path.realpath(raw)
+    if not any(under(path, root) for root in media_roots()):
+        return None
+    if under(path, os.path.realpath(os.path.expanduser("~/.ssh"))):
+        return None
+    try:
+        info = os.stat(path)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > MEDIA_MAX:
+            return None
+        with open(path, "rb") as handle:
+            kind = image_kind(handle.read(32))
+    except OSError:
+        return None
+    return (path, kind[0]) if kind else None
+
+
+def serve_media(client, target, lines):
+    if key_refused(client, lines):
+        return
+    found = media_file((query_of(target).get("path") or [""])[0])
+    data = None
+    if found:
+        try:
+            with open(found[0], "rb") as handle:
+                data = handle.read(MEDIA_MAX + 1)
+        except OSError:
+            data = None
+    # Checked again on the bytes actually sent: the file may have changed.
+    if not data or len(data) > MEDIA_MAX or image_kind(data[:32]) is None:
+        json_error(client, 404, "Not Found", "no_image", "No such image")
+        return
+    send_response(client, 200, "OK", data, image_kind(data[:32])[0])
+
+
+def read_exact(client, leftover, length):
+    body = bytearray(leftover[:length] if leftover else b"")
+    client.settimeout(60)
+    while len(body) < length:
+        chunk = client.recv(min(BODY_CHUNK, length - len(body)))
+        if not chunk:
+            raise ValueError("short body")
+        body += chunk
+    return bytes(body)
+
+
+def save_upload(profile, data, kind):
+    folder = os.path.join(profile_home(profile), UPLOAD_DIR)
+    os.makedirs(folder, mode=0o700, exist_ok=True)
+    name = "phone-%s-%s.%s" % (time.strftime("%Y%m%d-%H%M%S"), os.urandom(4).hex(), kind[1])
+    path = os.path.join(folder, name)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(data)
+    return path, name
+
+
+def serve_upload(client, target, lines, leftover):
+    if key_refused(client, lines):
+        return
+    profile = query_profile(client, query_of(target))
+    if profile is None:
+        return
+    _fields, _names, length, chunked = header_map(lines)
+    if chunked or length is None:
+        json_error(client, 411, "Length Required", "length_required", "Send the photo with a length")
+        return
+    if length > UPLOAD_MAX:
+        json_error(client, 413, "Payload Too Large", "too_large", "That photo is too large")
+        return
+    if not length:
+        json_error(client, 400, "Bad Request", "empty", "No photo was sent")
+        return
+    data = read_exact(client, leftover, length)
+    kind = image_kind(data[:32])
+    if kind is None:
+        json_error(client, 415, "Unsupported Media Type", "not_image", "That file is not a picture")
+        return
+    try:
+        path, name = save_upload(profile, data, kind)
+    except OSError as exc:
+        log("upload: %s" % type(exc).__name__)
+        json_error(client, 507, "Insufficient Storage", "not_saved", "Could not save the photo")
+        return
+    log("upload: %d bytes" % len(data))
+    send_response(client, 201, "Created", json.dumps({"path": path, "name": name, "type": kind[0]}),
+                  "application/json")
+
+
 # --- Face ID (passkey) ---------------------------------------------------------
 # faceid.py holds the checks. Before a passkey is enrolled nothing here changes
 # how the page works. After, every API request needs the unlock cookie, the
@@ -1159,7 +1296,7 @@ def serve_cron(client, target, lines, local):
 AUTH_PREFIX = "/phone-api/auth/"
 # Answered here, not by Hermes: no key goes out for them.
 LOCAL_API = (BUSY_PATH, ACTIVE_PATH, DECIDE_PATH, PROFILES_PATH, META_PATH,
-             CRON_PATH, CRON_RUNS_PATH, CRON_OUTPUT_PATH)
+             CRON_PATH, CRON_RUNS_PATH, CRON_OUTPUT_PATH, UPLOAD_PATH, MEDIA_PATH)
 # Polls that must not keep a Face ID session awake.
 BACKGROUND = (BUSY_PATH, ACTIVE_PATH, PROFILES_PATH, META_PATH)
 RUN_APPROVAL = re.compile(r"^/v1/runs/([A-Za-z0-9_.:-]{1,128})/approval$")
@@ -1355,6 +1492,13 @@ def handle_client(client, upstream_addr=UPSTREAM):
             return
         if local == DECIDE_PATH and method == "POST":
             serve_decide(client, lines, leftover)
+            return
+        if local == UPLOAD_PATH and method == "POST":
+            serve_upload(client, target, lines, leftover)
+            return
+        if local == MEDIA_PATH and method == "GET":
+            # Not logged: the query is a file path.
+            serve_media(client, target, lines)
             return
         log("%s %s" % (method, path))
         note_poll(method, rest)

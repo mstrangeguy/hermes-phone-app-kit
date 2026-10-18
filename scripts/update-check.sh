@@ -77,7 +77,7 @@ run_test() {  # name
 if [ -z "$PY" ] || [ ! -x "$PY" ]; then
   ok=0; results=" Hermes Python not found;"
 else
-  for t in plugin faceid approvals alerts busy profiles cron look; do run_test "$t"; done
+  for t in plugin faceid approvals alerts busy profiles cron look pictures; do run_test "$t"; done
 fi
 [ "$simulate" = 1 ] && { ok=0; results="$results simulated failure;"; }
 

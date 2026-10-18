@@ -1882,6 +1882,9 @@ async function openSession(id, title, push, profile) {
   state.messages = [];
   state.hasEarlier = false;
   OTHER.busy = null;
+  // Pictures waiting in the box belong to the session they were picked in.
+  clearTray(true);
+  paintSendState();
   markRead(id);
   historyNodes.clear();
   if (state.tail && state.tail.sessionId !== id) state.tail = null;
@@ -2236,7 +2239,10 @@ function paintDraftHint() {
     : hasUser ? "Send a follow-up" : "Give Hermes a task";
 }
 
-function userBubble(text, steer) {
+// sources: pictures to show in the bubble, each {url} (a local preview) or
+// {path} (a file on the Mac). Without them, picture lines in the saved text
+// are turned back into pictures.
+function userBubble(text, steer, sources) {
   const wrap = document.createElement("div");
   wrap.className = "msg user" + (steer ? " steer" : "");
   if (steer) {
@@ -2245,11 +2251,259 @@ function userBubble(text, steer) {
     label.textContent = "Guidance";
     wrap.append(label);
   }
+  let shown = text;
+  let pics = sources || [];
+  if (!steer && !sources) {
+    const parsed = picText(text);
+    if (parsed.paths.length) {
+      shown = parsed.text;
+      pics = parsed.paths.map((path) => ({ path }));
+    }
+  }
   const bubble = document.createElement("div");
   bubble.className = "bubble";
-  bubble.textContent = text;
+  if (shown) {
+    const words = document.createElement("div");
+    words.className = "bubble-text";
+    words.textContent = shown;
+    bubble.append(words);
+  }
+  if (pics.length) {
+    const row = document.createElement("div");
+    row.className = "pics";
+    for (const source of pics) row.append(picFigure(source));
+    bubble.append(row);
+  }
   wrap.append(bubble);
   return wrap;
+}
+
+// --- Pictures -----------------------------------------------------------------
+// Sending: each picture is shrunk on the phone (longest side PIC_SIDE, JPEG,
+// which also drops the location data in the photo), saved on the Mac through
+// /phone-api/upload, and sent as an image part plus a "[Image attached at:
+// <path>]" line, the same hint Hermes's own apps use. Hermes stores the text
+// with "[screenshot]" in place of each image, so the path line is what lets
+// this page show the picture again from history.
+// Receiving: a MEDIA:/path tag or a ![](/path) image in a reply is shown as a
+// picture, fetched through /phone-api/media (images only, never logged).
+
+const PIC_SIDE = 1600;
+const PIC_LIMIT = 4;
+const PIC_DEFAULT = "What do you see in this picture?";
+const PIC_LINE = /^\[Image attached at: (.+)\]$/;
+const PIC_DESKTOP = /^@image:(?:`([^`]+)`|"([^"]+)"|'([^']+)'|(\S+))$/;
+const PIC_EXT = /\.(png|jpe?g|gif|webp|heic|heif)$/i;
+const PICS = { items: [], pickerOpen: false };
+const MEDIA = new Map();
+// Read by Hermes as part of its instructions for every turn sent from here.
+const PHONE_INSTRUCTIONS =
+  "The user is on the Hermes phone page, which shows pictures. To show an image file from this Mac, " +
+  "put MEDIA:/absolute/path/to/file.png on its own line (png, jpg, gif, webp or heic). This replaces the " +
+  "API-server note that MEDIA tags show as plain text on the runs endpoint. Pictures the user sends are " +
+  "saved on this Mac, and each path is in the message as [Image attached at: <path>].";
+
+// Picture lines in a saved user message: this page's, and the desktop's @image: lines.
+function picText(text) {
+  const paths = [];
+  const keep = [];
+  for (const line of String(text || "").split("\n")) {
+    const clean = line.trim();
+    const mine = clean.match(PIC_LINE);
+    const desktop = mine ? null : clean.match(PIC_DESKTOP);
+    if (mine) paths.push(mine[1].trim());
+    else if (desktop) paths.push(desktop[1] || desktop[2] || desktop[3] || desktop[4]);
+    else keep.push(line);
+  }
+  if (!paths.length) return { text: String(text || ""), paths };
+  return { text: keep.filter((line) => line.trim() !== "[screenshot]").join("\n").trim(), paths };
+}
+
+function mediaUrl(path) {
+  let found = MEDIA.get(path);
+  if (!found) {
+    found = api("/phone-api/media?path=" + encodeURIComponent(path)).then(async (res) => {
+      if (!res.ok) throw new Error("missing");
+      return URL.createObjectURL(await res.blob());
+    });
+    found.catch(() => MEDIA.delete(path));
+    MEDIA.set(path, found);
+  }
+  return found;
+}
+
+function picFigure(source) {
+  const box = document.createElement("button");
+  box.type = "button";
+  box.className = "pic";
+  const img = document.createElement("img");
+  img.alt = "Picture";
+  img.decoding = "async";
+  box.append(img);
+  if (source.url) {
+    img.src = source.url;
+  } else {
+    box.classList.add("loading");
+    mediaUrl(source.path).then((url) => {
+      img.src = url;
+      box.classList.remove("loading");
+    }).catch(() => {
+      box.classList.remove("loading");
+      box.classList.add("missing");
+      box.textContent = "Picture not available";
+    });
+  }
+  box.addEventListener("click", () => { if (img.src) openViewer(img.src); });
+  return box;
+}
+
+// Full screen. Tap to close; press and hold the picture to save or share it.
+function openViewer(src) {
+  const viewer = document.createElement("div");
+  viewer.className = "viewer";
+  const img = document.createElement("img");
+  img.src = src;
+  img.alt = "Picture";
+  viewer.append(img);
+  viewer.addEventListener("click", () => viewer.remove());
+  document.body.append(viewer);
+}
+
+// Reply text with its picture tags turned into pictures. Tags inside code stay text.
+const PIC_MARK = "HermesPhonePic";
+const MEDIA_TAG = /MEDIA:\s*(?:`([^`\n]+)`|"([^"\n]+)"|((?:~\/|\/)[^\s`"'<>]+))|!\[[^\]\n]*\]\(((?:~\/|\/)[^)\s]+)\)/g;
+
+function setReplyHtml(el, text) {
+  const found = [];
+  const marked = String(text ?? "").replace(MEDIA_TAG, (raw, a, b, c, d) => {
+    const path = (a || b || c || d || "").trim().replace(/[.,;:)]+$/, "");
+    if (!PIC_EXT.test(path)) return raw;
+    found.push({ raw, path });
+    return PIC_MARK + (found.length - 1) + "X";
+  });
+  el.innerHTML = renderMarkdown(marked);
+  if (!found.length) return;
+  const mark = new RegExp(PIC_MARK + "(\\d+)X", "g");
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  for (const node of nodes) {
+    const value = node.nodeValue;
+    if (value.indexOf(PIC_MARK) < 0) continue;
+    const inCode = node.parentElement && node.parentElement.closest("code, pre");
+    const frag = document.createDocumentFragment();
+    let last = 0;
+    let m;
+    mark.lastIndex = 0;
+    while ((m = mark.exec(value))) {
+      frag.append(value.slice(last, m.index));
+      const item = found[Number(m[1])];
+      if (!item) frag.append(m[0]);
+      else if (inCode) frag.append(item.raw);
+      else frag.append(picFigure({ path: item.path }));
+      last = m.index + m[0].length;
+    }
+    frag.append(value.slice(last));
+    node.replaceWith(frag);
+  }
+}
+
+// Shrink on the phone: a camera photo is several MB, and Hermes takes at most 10 MB per message.
+async function shrinkPicture(file) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error("That picture could not be opened."));
+      el.src = url;
+    });
+    const scale = Math.min(1, PIC_SIDE / Math.max(img.naturalWidth, img.naturalHeight, 1));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+    canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.85));
+    if (!blob) throw new Error("That picture could not be prepared.");
+    return blob;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(new Error("Could not read the picture."));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function uploadPicture(profile, blob) {
+  const res = await api("/phone-api/upload?profile=" + encodeURIComponent(profile || "default"), {
+    method: "POST",
+    headers: { "Content-Type": blob.type || "image/jpeg" },
+    body: blob
+  });
+  if (!res.ok) throw new Error(await errorMessage(res));
+  const data = await res.json();
+  if (!data.path) throw new Error("The picture was not saved.");
+  return data.path;
+}
+
+function paintTray() {
+  const tray = $("tray");
+  tray.textContent = "";
+  tray.hidden = !PICS.items.length;
+  for (const item of PICS.items) {
+    const cell = document.createElement("div");
+    cell.className = "tray-item" + (item.url ? "" : " busy");
+    if (item.url) {
+      const img = document.createElement("img");
+      img.src = item.url;
+      img.alt = "Picture to send";
+      cell.append(img);
+    }
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "tray-remove";
+    remove.setAttribute("aria-label", "Remove picture");
+    remove.textContent = "×";
+    remove.addEventListener("click", () => {
+      PICS.items = PICS.items.filter((i) => i !== item);
+      if (item.url) URL.revokeObjectURL(item.url);
+      paintTray();
+      paintSendState();
+    });
+    cell.append(remove);
+    tray.append(cell);
+  }
+}
+
+function clearTray(revoke) {
+  if (revoke) for (const item of PICS.items) if (item.url) URL.revokeObjectURL(item.url);
+  PICS.items = [];
+  paintTray();
+}
+
+function readyPics() {
+  return PICS.items.filter((item) => item.blob && item.url);
+}
+
+function paintSendState() {
+  const run = liveRun(state.sessionId);
+  const busy = PICS.items.some((item) => !item.url);
+  $("send").disabled = busy || !($("draft").value.trim() || readyPics().length) || Boolean(run && run.steering);
+  $("attach").disabled = Boolean(run);
+}
+
+// The photo picker or camera can hide the page; that must not lock it.
+function pickerDone() {
+  if (!PICS.pickerOpen) return;
+  PICS.pickerOpen = false;
+  LOCK.prompting = Math.max(0, LOCK.prompting - 1);
+  LOCK.lastInput = Date.now();
 }
 
 function renderHistoryMessage(message, results) {
@@ -2291,7 +2545,7 @@ function renderHistoryMessage(message, results) {
   if (text && !calls.length) {
     const body = document.createElement("div");
     body.className = "assistant";
-    body.innerHTML = renderMarkdown(textOf(message.content));
+    setReplyHtml(body, textOf(message.content));
     wrap.append(body);
   }
   if (!wrap.childNodes.length) return null;
@@ -2432,13 +2686,10 @@ function liveContainer() {
 function userNode(run) {
   if (!run.userText || historyHasUser(run)) return null;
   if (!run._userNode) {
-    const wrap = document.createElement("div");
-    wrap.className = "msg user";
-    const bubble = document.createElement("div");
-    bubble.className = "bubble";
-    bubble.textContent = run.userText;
-    wrap.append(bubble);
-    run._userNode = wrap;
+    // Pictures being sent show from their local preview; after a reload, from the Mac.
+    // Without local previews (after a reload) userBubble reads the paths out of the text.
+    const sources = run.picUrls && run.picUrls.length ? run.picUrls.map((url) => ({ url })) : undefined;
+    run._userNode = userBubble(sources ? run.shownText || "" : run.userText, false, sources);
   }
   return run._userNode;
 }
@@ -2603,7 +2854,7 @@ function liveNode(block) {
   if (entry.sig === sig) return entry.node;
   entry.sig = sig;
   if (block.kind === "text") {
-    entry.node.querySelector(".assistant").innerHTML = renderMarkdown(block.text || "");
+    setReplyHtml(entry.node.querySelector(".assistant"), block.text || "");
   } else if (block.kind === "tool") {
     updateToolBlock(entry.node, block);
   } else {
@@ -2638,14 +2889,19 @@ function renderLive(rebuilding) {
   if (stick) root.scrollTop = root.scrollHeight;
 }
 
+// Hermes saves a picture message's text with a "[screenshot]" line per image.
+function sameUserText(text) {
+  return String(text || "").split("\n").filter((line) => line.trim() !== "[screenshot]").join("\n").trim();
+}
+
 function historyHasUser(run) {
-  const needle = (run.userText || "").trim();
+  const needle = sameUserText(run.userText);
   let count = 0;
   let last = "";
   for (const message of state.messages) {
     if (realUser(message)) {
       count += 1;
-      last = textOf(message.content).trim();
+      last = sameUserText(textOf(message.content));
     }
   }
   return count > (run.userCountAtSend || 0) && last === needle;
@@ -2671,7 +2927,7 @@ function renderLiveBlock(block) {
     wrap.className = "msg assistant";
     const body = document.createElement("div");
     body.className = "assistant";
-    body.innerHTML = renderMarkdown(block.text || "");
+    setReplyHtml(body, block.text || "");
     wrap.append(body);
     return wrap;
   }
@@ -2694,7 +2950,7 @@ function paintRunChrome() {
   $("stop").hidden = !run;
   $("send").setAttribute("aria-label", run ? "Send guidance" : "Send");
   $("draft").disabled = false;
-  $("send").disabled = !$("draft").value.trim() || Boolean(run && run.steering);
+  paintSendState();
   paintDraftHint();
   const elsewhere = state.runs.filter((r) => !r.done && r.sessionId !== state.sessionId);
   if (elsewhere.length && $("chat-screen").hidden === false) {
@@ -3250,11 +3506,20 @@ function failStart(run, message) {
   dropRun(run);
   saveRuns();
   keepNotes(run);
-  // Nothing was saved, so put the message back in the box to retry.
+  // Nothing was saved, so put the message (and its pictures) back to retry.
   const draft = $("draft");
-  if (run.userText && !draft.value.trim() && state.sessionId === run.sessionId) {
-    draft.value = run.userText;
-    draft.dispatchEvent(new Event("input"));
+  const words = run.picItems ? run.shownText || "" : run.userText;
+  if (state.sessionId === run.sessionId) {
+    if (words && !draft.value.trim()) {
+      draft.value = words;
+      draft.dispatchEvent(new Event("input"));
+    }
+    if (run.picItems && run.picItems.length && !PICS.items.length) {
+      PICS.items = run.picItems;
+      run.picItems = null;
+      paintTray();
+      paintSendState();
+    }
   }
   if (state.sessionId === run.sessionId) renderTranscript();
   paintRunChrome();
@@ -3264,16 +3529,22 @@ async function sendMessage(text) {
   const sessionId = state.sessionId;
   if (!sessionId || liveRun(sessionId)) return;
   dropDoneRuns(null);
+  const picItems = readyPics();
+  if (picItems.length) PICS.items = PICS.items.filter((item) => !picItems.includes(item));
   const run = {
     sessionId,
     openedId: sessionId,
     profile: state.profile || "default",
     title: state.title,
     runId: "",
-    userText: text,
+    // Never empty: it is what marks the run as having a message on screen.
+    userText: text || (picItems.length ? PIC_DEFAULT : ""),
+    shownText: text,
+    picItems: picItems.length ? picItems : null,
+    picUrls: picItems.map((item) => item.url),
     blocks: [],
     approvals: [],
-    statusText: REPLYING,
+    statusText: picItems.length ? "Sending the picture" + (picItems.length > 1 ? "s" : "") + "…" : REPLYING,
     startedAt: Date.now(),
     phaseSince: Date.now(),
     userCountAtSend: state.messages.filter(realUser).length,
@@ -3285,14 +3556,40 @@ async function sendMessage(text) {
   state.tail = null;
   $("draft").value = "";
   $("draft").style.height = "auto";
+  paintTray();
   renderTranscript();
   paintRunChrome();
+  let input = text;
+  if (picItems.length) {
+    // Saved on the Mac first, so the message can carry each picture's path.
+    try {
+      const paths = [];
+      const parts = [];
+      for (const item of picItems) {
+        paths.push(await uploadPicture(run.profile, item.blob));
+        parts.push({ type: "image_url", image_url: { url: await blobToDataUrl(item.blob) } });
+      }
+      const words = (text || PIC_DEFAULT) + "\n\n" + paths.map((p) => "[Image attached at: " + p + "]").join("\n");
+      run.userText = words;
+      input = [{ role: "user", content: [{ type: "text", text: words }].concat(parts) }];
+    } catch (e) {
+      if (e.status === 401) {
+        dropRun(run);
+        paintRunChrome();
+        return showKey(e.message);
+      }
+      failStart(run, e.message || "Could not send the picture");
+      return;
+    }
+    run.statusText = REPLYING;
+    run.phaseSince = Date.now();
+  }
   let res;
   try {
     res = await api(inProfile(run.profile, "/v1/runs"), {
       method: "POST",
       headers: { "Idempotency-Key": crypto.randomUUID() },
-      body: JSON.stringify({ input: text, session_id: sessionId })
+      body: JSON.stringify({ input, session_id: sessionId, instructions: PHONE_INSTRUCTIONS })
     });
   } catch (e) {
     if (e.status === 401) {
@@ -3630,13 +3927,56 @@ $("job-back").addEventListener("click", () => {
 $("composer").addEventListener("submit", (event) => {
   event.preventDefault();
   const text = $("draft").value.trim();
-  if (!text) return;
+  const running = liveRun(state.sessionId);
+  if (PICS.items.some((item) => !item.url)) return;
+  if (!text && (running || !readyPics().length)) return;
   notice("");
   // A reply running in this session takes the text as guidance. One running
   // anywhere else does not matter: this session sends as normal.
-  if (liveRun(state.sessionId)) steerRun(text);
+  if (running) steerRun(text);
   else sendMessage(text);
 });
+
+$("attach").addEventListener("click", () => {
+  if (liveRun(state.sessionId)) return;
+  if (PICS.items.length >= PIC_LIMIT) return notice("Up to " + PIC_LIMIT + " pictures per message.");
+  // The picker or camera may hide the page; that is not leaving the app.
+  if (!PICS.pickerOpen) {
+    PICS.pickerOpen = true;
+    LOCK.prompting++;
+    const token = (PICS.token = (PICS.token || 0) + 1);
+    setTimeout(() => { if (PICS.token === token) pickerDone(); }, 5 * 60 * 1000);
+  }
+  $("photo-input").value = "";
+  $("photo-input").click();
+});
+
+$("photo-input").addEventListener("cancel", pickerDone);
+$("photo-input").addEventListener("change", async () => {
+  pickerDone();
+  const files = Array.from($("photo-input").files || []);
+  $("photo-input").value = "";
+  const room = PIC_LIMIT - PICS.items.length;
+  if (files.length > room) notice("Up to " + PIC_LIMIT + " pictures per message.");
+  const added = files.slice(0, Math.max(0, room)).map((file) => ({ file, blob: null, url: "" }));
+  if (!added.length) return;
+  PICS.items = PICS.items.concat(added);
+  paintTray();
+  paintSendState();
+  for (const item of added) {
+    try {
+      item.blob = await shrinkPicture(item.file);
+      item.url = URL.createObjectURL(item.blob);
+    } catch (e) {
+      PICS.items = PICS.items.filter((i) => i !== item);
+      notice(e.message || "That picture could not be added.");
+    }
+    item.file = null;
+    paintTray();
+    paintSendState();
+  }
+});
+window.addEventListener("focus", pickerDone);
 
 $("stop").addEventListener("click", stopRun);
 
@@ -3644,12 +3984,12 @@ $("draft").addEventListener("input", () => {
   const draft = $("draft");
   draft.style.height = "auto";
   draft.style.height = Math.min(draft.scrollHeight, 120) + "px";
-  const run = liveRun(state.sessionId);
-  $("send").disabled = !draft.value.trim() || Boolean(run && run.steering);
+  paintSendState();
 });
 
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState !== "visible") return lockNow();
+  pickerDone();
   if (resumeLocked()) return;
   autoUnlock();
   const run = liveRun(state.sessionId);
