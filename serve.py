@@ -1047,11 +1047,42 @@ def reactions_enabled(profile):
             display = (yaml.safe_load(text) or {}).get("display")
             value = bool(isinstance(display, dict) and display.get("message_reactions", False))
         except ImportError:
-            block = re.search(r"^display:\s*\n((?:[ \t]+.*\n?)*)", text, re.M)
-            value = bool(block and re.search(r"^\s+message_reactions:\s*(true|yes|on)\s*$", block.group(1), re.M | re.I))
+            value = yaml_flag(text, "display", "message_reactions")
     except (OSError, ValueError, AttributeError):
         value = False
     _reaction_flags[path] = (stamp, value)
+    return value
+
+
+def yaml_flag(text, section, key):
+    """section.key from config.yaml text as a bool, for a Python without PyYAML.
+
+    Reads the top-level section line by line. Blank lines and comment lines do
+    not end it (a real config.yaml has many of both); the next line starting
+    at column 0 does. Only the section's own child indent counts, so a nested
+    key of the same name is ignored. true/yes/on in any case, with an optional
+    trailing comment, is True. As in YAML, the last occurrence wins.
+    """
+    head = re.compile(r"^%s:\s*(?:#.*)?$" % re.escape(section))
+    value, inside, indent = False, False, None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if not line[0].isspace():
+            inside = bool(head.match(line))
+            if inside:
+                value, indent = False, None
+            continue
+        if not inside:
+            continue
+        width = len(line) - len(line.lstrip())
+        if indent is None:
+            indent = width
+        if width != indent or not stripped.startswith(key + ":"):
+            continue
+        setting = re.split(r"\s+#", stripped[len(key) + 1:], maxsplit=1)[0].strip()
+        value = setting.lower() in ("true", "yes", "on")
     return value
 
 

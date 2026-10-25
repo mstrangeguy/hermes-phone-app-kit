@@ -173,6 +173,43 @@ status, body = call(R + "?profile=quiet&session=tip1&ids=2,4")
 check("read: profile with reactions off says so, sends none", status == 200 and body == {"enabled": False, "reactions": {}})
 check("read: unknown profile 404", call(R + "?profile=nope&session=tip1&ids=2")[0] == 404)
 
+# --- Reactions: the settings gate without PyYAML ------------------------------
+# Hermes's own Python may lack PyYAML; then serve.py reads config.yaml itself.
+# A real config.yaml has blank lines and comments all through `display:`.
+# sys.modules["yaml"] = None makes `import yaml` fail here even where it is
+# installed, so these cases mean the same on every Mac.
+GATE_CASES = [
+    ("compact block", "display:\n  compact: false\n  message_reactions: true\n", True),
+    ("blank line before the key", "display:\n  compact: false\n\n  message_reactions: true\n", True),
+    ("column-0 comment before the key", "display:\n  compact: false\n# note\n  message_reactions: true\n", True),
+    ("indented comment before the key", "display:\n  compact: false\n  # note\n  message_reactions: true\n", True),
+    ("inline comment after true", "display:\n  message_reactions: true  # tapbacks\n", True),
+    ("yes/On in any case", "display:\n  message_reactions: On\n", True),
+    ("long section, key far down",
+     "model:\n  default: x\n\ndisplay:\n  compact: false\n\n" + "  # filler\n  other: 1\n\n" * 50 +
+     "  message_reactions: true\n\nterminal:\n  backend: local\n", True),
+    ("false", "display:\n  compact: false\n\n  message_reactions: false\n", False),
+    ("key under the next top-level section", "display:\n  compact: false\n\nother:\n  message_reactions: true\n", False),
+    ("nested key of the same name", "display:\n  skin:\n    message_reactions: true\n  compact: false\n", False),
+    ("key missing", "display:\n  compact: false\n", False),
+    ("no display section", "model:\n  default: x\n", False),
+]
+real_home, real_yaml = serve.HERMES_HOME, sys.modules.get("yaml", "absent")
+sys.modules["yaml"] = None
+try:
+    for i, (label, text, want) in enumerate(GATE_CASES):
+        serve.HERMES_HOME = os.path.join(work, "gate%d" % i)
+        os.makedirs(serve.HERMES_HOME, exist_ok=True)
+        with open(os.path.join(serve.HERMES_HOME, "config.yaml"), "w") as handle:
+            handle.write(text)
+        check("gate without PyYAML: %s -> %s" % (label, want), serve.reactions_enabled("default") is want)
+finally:
+    serve.HERMES_HOME = real_home
+    if real_yaml == "absent":
+        sys.modules.pop("yaml", None)
+    else:
+        sys.modules["yaml"] = real_yaml
+
 # --- Reactions: set -----------------------------------------------------------
 status, body = call(R, method="POST", body={"session": "tip1", "row_id": 2, "emoji": HEART})
 check("set: heart on a lineage row", status == 200 and body.get("reactions") ==
