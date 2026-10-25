@@ -990,6 +990,7 @@ function saveUnread(set) {
 function markRead(id) {
   const set = unreadSet();
   if (set.delete(id)) saveUnread(set);
+  setBadge(set.size);
 }
 
 function sessionDot(id) {
@@ -1009,7 +1010,8 @@ async function checkActive() {
   if (ACTIVE.checking || document.hidden || !authed()) return;
   ACTIVE.checking = true;
   try {
-    const res = await api("/phone-api/active");
+    // The unread count lets the Mac's next push carry the right badge.
+    const res = await api("/phone-api/active?unread=" + unreadSet().size);
     if (!res.ok) return;
     const data = await res.json();
     if (!data.active || typeof data.active !== "object") return;
@@ -1026,6 +1028,7 @@ async function checkActive() {
       if (!viewing) set.add(id);
     }
     if (ended) saveUnread(set);
+    setBadge(set.size);
     if (!$("list-screen").hidden) {
       if (ended) await loadSessions(true).catch(() => renderSessions());
       else paintDots();
@@ -1466,6 +1469,208 @@ function pickMode(mode) {
     history.replaceState({}, "", location.pathname);
     showList();
   }
+}
+
+// --- Notifications (Web Push) -------------------------------------------------
+// The Home Screen app subscribes with the Mac's public key; the Mac then sends
+// each alert through Apple's push service, end-to-end encrypted. iOS 18.4+
+// shows the Mac's declarative message itself (window.pushManager, no worker).
+// Older browsers get sw.js. iOS only offers push to the Home Screen app, and
+// subscribe() must run straight from the tap, so the key and the push manager
+// are fetched ahead of time.
+const PUSH = { manager: null, key: "", endpoint: "", subscribed: false, ready: false, channel: "",
+               busy: false, note: "", started: false };
+
+function pushStandalone() {
+  return navigator.standalone === true || (window.matchMedia && matchMedia("(display-mode: standalone)").matches);
+}
+
+// Not named pushManager: a top-level function in a classic script becomes
+// window.pushManager and would hide Safari's own.
+function declarativePush() {
+  const manager = window.pushManager || navigator.pushManager;
+  return manager && typeof manager.subscribe === "function" && typeof manager.getSubscription === "function"
+    ? manager : null;
+}
+
+async function findPushManager() {
+  const declarative = declarativePush();
+  if (declarative) return declarative;
+  if (!("serviceWorker" in navigator) || !("PushManager" in window)) return null;
+  const reg = await navigator.serviceWorker.register("sw.js", { scope: "./" });
+  await navigator.serviceWorker.ready;
+  return reg.pushManager;
+}
+
+function sameKey(sub, key) {
+  const have = sub && sub.options && sub.options.applicationServerKey;
+  if (!have) return true;  // not exposed: trust the server's answer
+  return toB64(have) === key;
+}
+
+async function pushInit() {
+  if (PUSH.started) return renderPush();
+  PUSH.started = true;
+  try {
+    PUSH.manager = await findPushManager();
+    if (!PUSH.manager) {
+      PUSH.note = /iPhone|iPad/.test(navigator.userAgent) && !pushStandalone()
+        ? "Add this page to the Home Screen and open it from there to get notifications."
+        : "This browser can't receive notifications.";
+      return;
+    }
+    let sub = await PUSH.manager.getSubscription();
+    const endpoint = sub ? sub.endpoint : "";
+    const res = await api("/phone-api/push/key" + (endpoint ? "?endpoint=" + encodeURIComponent(endpoint) : ""));
+    if (!res.ok) throw new Error(await errorMessage(res));
+    const info = await res.json();
+    PUSH.key = info.public_key || "";
+    PUSH.ready = !!info.ready;
+    PUSH.channel = info.channel || "";
+    if (sub && !sameKey(sub, PUSH.key)) {
+      // The Mac's key changed (webpush.json was reset): this subscription is dead.
+      await sub.unsubscribe().catch(() => {});
+      sub = null;
+    }
+    PUSH.endpoint = sub ? sub.endpoint : "";
+    PUSH.subscribed = !!(sub && info.subscribed);
+    if (sub && !info.subscribed) {
+      // The phone still has it but the Mac forgot it (say, Apple reported it
+      // gone once): send it again rather than leave notifications half on.
+      PUSH.subscribed = await pushSave(sub);
+    }
+  } catch (e) {
+    PUSH.note = e.message || "Notifications are not available right now.";
+  } finally {
+    renderPush();
+  }
+}
+
+async function pushSave(sub) {
+  const res = await api("/phone-api/push/subscribe", {
+    method: "POST", body: JSON.stringify({ subscription: sub.toJSON() }) });
+  if (!res.ok) throw new Error(await errorMessage(res));
+  PUSH.endpoint = sub.endpoint;
+  return true;
+}
+
+function renderPush() {
+  const button = $("push-btn");
+  button.textContent = PUSH.subscribed ? "Notifications: on" : "Notifications: off";
+  button.setAttribute("aria-pressed", PUSH.subscribed ? "true" : "false");
+  button.disabled = PUSH.busy;
+  $("push-test").hidden = !PUSH.subscribed;
+  $("push-test").disabled = PUSH.busy;
+  let note = PUSH.note;
+  if (!note && PUSH.subscribed && !PUSH.ready) note = "The Mac has no https address for alerts yet (alerts.url in config.json).";
+  else if (!note && PUSH.subscribed && PUSH.channel !== "webpush") {
+    note = "On for this phone, but the Mac sends alerts through " + (PUSH.channel || "none") + ". Set alerts.channel to webpush.";
+  }
+  $("push-note").textContent = note || "";
+  $("push-note").hidden = !note;
+}
+
+function pushToggle() {
+  if (PUSH.busy) return;
+  if (PUSH.subscribed) {
+    PUSH.note = "";
+    return void pushOff();
+  }
+  if (!PUSH.manager || !PUSH.key) {
+    // Keep the reason pushInit found (say, "Add this page to the Home Screen").
+    if (PUSH.manager) PUSH.note = "Can't reach Hermes for the notification key.";
+    else if (!PUSH.note) PUSH.note = "This browser can't receive notifications.";
+    return void renderPush();
+  }
+  PUSH.note = "";
+  PUSH.busy = true;
+  renderPush();
+  LOCK.prompting++;  // the permission sheet must not count as leaving the app
+  let asked;
+  try {
+    // Called straight from the tap: iOS asks for permission only then.
+    asked = PUSH.manager.subscribe({ userVisibleOnly: true, applicationServerKey: fromB64(PUSH.key) });
+  } catch (e) {
+    asked = Promise.reject(e);
+  }
+  asked.then(pushSave).then((ok) => {
+    PUSH.subscribed = ok;
+    PUSH.note = "On. Tap Send test to check.";
+  }).catch((e) => {
+    PUSH.note = e && e.name === "NotAllowedError"
+      ? "Notifications are blocked for this app. Allow them in iOS Settings, Notifications, then try again."
+      : (e && e.message) || "Couldn't turn notifications on.";
+  }).finally(() => {
+    LOCK.prompting = Math.max(0, LOCK.prompting - 1);
+    LOCK.lastInput = Date.now();
+    PUSH.busy = false;
+    renderPush();
+  });
+}
+
+async function pushOff() {
+  PUSH.busy = true;
+  renderPush();
+  try {
+    const sub = PUSH.manager && await PUSH.manager.getSubscription();
+    const endpoint = (sub && sub.endpoint) || PUSH.endpoint;
+    if (sub) await sub.unsubscribe().catch(() => {});
+    if (endpoint) {
+      await api("/phone-api/push/unsubscribe", { method: "POST", body: JSON.stringify({ endpoint }) });
+    }
+    PUSH.subscribed = false;
+    PUSH.endpoint = "";
+    PUSH.note = "Off. This phone gets no alerts.";
+  } catch (e) {
+    PUSH.note = e.message || "Couldn't turn notifications off.";
+  } finally {
+    PUSH.busy = false;
+    renderPush();
+  }
+}
+
+async function pushTest() {
+  if (PUSH.busy || !PUSH.endpoint) return;
+  PUSH.busy = true;
+  PUSH.note = "Sending…";
+  renderPush();
+  try {
+    const res = await api("/phone-api/push/test", { method: "POST", body: JSON.stringify({ endpoint: PUSH.endpoint }) });
+    if (!res.ok) throw new Error(await errorMessage(res));
+    const data = await res.json();
+    PUSH.note = data.sent
+      ? "Sent. Leave the app to see it; it can take a few seconds."
+      : "Not delivered: " + ((data.problems || []).join("; ") || "unknown reason");
+    if (!data.sent && (data.problems || []).some((p) => /removed/.test(p))) PUSH.subscribed = false;
+  } catch (e) {
+    PUSH.note = e.message || "Couldn't send the test.";
+  } finally {
+    PUSH.busy = false;
+    renderPush();
+  }
+}
+
+// The Home Screen badge mirrors the unread dots.
+function setBadge(count) {
+  try {
+    if (!navigator.setAppBadge) return;
+    if (count > 0) navigator.setAppBadge(count).catch(() => {});
+    else navigator.clearAppBadge().catch(() => {});
+  } catch (e) {}
+}
+
+$("push-btn").addEventListener("click", pushToggle);
+$("push-test").addEventListener("click", pushTest);
+if ("serviceWorker" in navigator) {
+  // sw.js (older browsers) hands a tapped notification to an open page.
+  navigator.serviceWorker.addEventListener("message", (event) => {
+    const data = event.data || {};
+    if (data.type !== "open" || typeof data.url !== "string") return;
+    const url = new URL(data.url, location.href);
+    if (url.origin !== location.origin) return;
+    history.pushState({}, "", url.pathname + url.hash);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  });
 }
 
 // --- Bots -----------------------------------------------------------------------
@@ -4995,6 +5200,7 @@ async function boot() {
   }
   if (!authed()) return showKey("");
   watchActive();
+  pushInit();
   const target = hashTarget();
   try {
     await loadProfiles();
