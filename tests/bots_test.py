@@ -5,7 +5,8 @@ Usage: python3 -I tests/bots_test.py <repo-dir> <empty-scratch-dir>
 Covers: the main list hides cron runs, Bot Chats and messaging chats but keeps
 api_server, desktop and cli; pinned rows stay; the setting brings everything
 back; paging keeps fetching when a page is mostly hidden rows (and stops at the
-cap, and the page offset and has_more survive Hermes's pinned rows); finding each profile's Bot Chat, the no-Bot-Chat case, messaging groups
+cap, and the page offset and has_more survive Hermes's pinned rows); the Home
+Screen badge counts only unread rows the list shows; finding each profile's Bot Chat, the no-Bot-Chat case, messaging groups
 per platform, cron job state dots; that serve.py serves lists.js, the page loads
 it before app.js, the drawer order is Sessions, Bots, Cron jobs, and app.js
 uses these rules. The rules run in node, the same code the phone runs.
@@ -94,6 +95,18 @@ ok("mainRows tolerates junk", L.mainRows(null, false).length === 0);
 ok("api_server is not messaging on the phone", !L.isMessaging("api_server"));
 ok("desktop messaging list kept", ["telegram", "slack", "discord", "email", "sms", "webhook", "homeassistant", "feishu"].every(L.isMessaging));
 ok("local sources are not messaging", !["desktop", "cli", "tui", "cron", "oneshot", ""].some(L.isMessaging));
+
+// Home Screen badge: only unread ids the main list shows.
+const bc = L.badgeCount;
+ok("badge: own chat unread counts 1", bc(new Set(["d1"]), rows, false) === 1);
+ok("badge: cron row counts 0 with the setting off", bc(new Set(["c1"]), rows, false) === 0);
+ok("badge: cron row counts 1 with the setting on", bc(new Set(["c1"]), rows, true) === 1);
+ok("badge: pinned cron row counts 1 either way", bc(new Set(["p1"]), rows, false) === 1 && bc(new Set(["p1"]), rows, true) === 1);
+ok("badge: bot chat counts 0 with the setting off", bc(new Set(["b1"]), rows, false) === 0);
+ok("badge: id with no row (compression ancestor) counts 0", bc(new Set(["gone"]), rows, false) === 0 && bc(new Set(["gone"]), rows, true) === 0);
+ok("badge: empty set counts 0", bc(new Set(), rows, false) === 0 && bc(new Set(), rows, true) === 0);
+ok("badge: mixed set counts only shown rows", bc(new Set(["d1", "c1", "b1", "t1", "gone"]), rows, false) === 1);
+ok("badge: takes an array and tolerates junk", bc(["d1", "a1"], rows, false) === 2 && bc(null, rows, false) === 0 && bc(new Set(["d1"]), null, false) === 0);
 
 async function paging() {
   // A page that is mostly cron: 48 cron + 2 own, then a page of own chats.
@@ -234,6 +247,15 @@ check("no inline script or style, no on* handlers",
       not re.search(r"<script(?![^>]*\bsrc=)", html) and "<style" not in html and
       not re.search(r"\son[a-z]+\s*=", html) and not re.search(r'\sstyle="', html))
 check("main list uses mainRows", re.search(r"function ownSessions\(\)[\s\S]{0,400}PhoneLists\.mainRows", app))
+check("badge uses badgeCount with the View setting",
+      "PhoneLists.badgeCount(unreadSet(), state.sessions, VIEW.allSources)" in app)
+check("no badge from the raw unread set", not re.search(r"setBadge\(\s*set\.size", app) and "unread=\" + unreadSet().size" not in app)
+check("badge waits for the first list load", re.search(r"function shownUnread\(\)\s*\{\s*if \(!LIST\.loaded\) return null;", app))
+check("unread= left out before the first list load", 'unread === null ? "" : "?unread=" + unread' in app)
+check("badge refreshed after the list loads",
+      re.search(r"async function loadSessions[\s\S]{0,4000}LIST\.loaded = true;[\s\S]{0,600}refreshBadge\(\);", app))
+check("badge refreshed when the View setting changes",
+      re.search(r"VIEW\.allSources = !VIEW\.allSources;[\s\S]{0,200}refreshBadge\(\);", app))
 check("list paging uses fillPages and pageStep",
       re.search(r"async function loadSessions[\s\S]{0,3000}PhoneLists\.pageStep[\s\S]{0,1500}PhoneLists\.fillPages", app))
 check("setting stored with the view, off by default", "allSources: false" in app and "view.allSources = Boolean" in app)

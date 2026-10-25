@@ -818,7 +818,7 @@ const STATUS_RANK = { approval: 0, working: 1, unread: 2, idle: 3 };
 const VIEW_DEFAULT = { profile: "default", group: "date", sort: "updated", status: [], sources: [], archived: false, allSources: false, collapsed: {} };
 const VIEW = loadView();
 const PROFILES = { list: ["default"] };
-const LIST = { seq: 0, note: "" };
+const LIST = { seq: 0, note: "", loaded: false };
 // Rows per page, and how many pages one load may fetch per profile to fill
 // the screen when most rows are filtered out (cron runs, messaging chats).
 const PAGE_ROWS = 50;
@@ -920,10 +920,12 @@ async function loadSessions(reset) {
   if (seq !== LIST.seq) return;
   state.pages = pages;
   state.sessions = [...merged.values()];
+  LIST.loaded = true;
   LIST.note = failed.size ? "Could not load " + [...failed].map(profileLabel).join(", ") + "." : "";
   await loadMeta(profiles).catch((e) => { if (e.status === 401) throw e; });
   if (seq !== LIST.seq) return;
   renderSessions();
+  refreshBadge();
   // The Source choices come from the loaded rows; refresh an open sheet.
   if (!$("drawer").hidden && DRAWER.mode === "sessions") renderSheet();
 }
@@ -990,7 +992,19 @@ function saveUnread(set) {
 function markRead(id) {
   const set = unreadSet();
   if (set.delete(id)) saveUnread(set);
-  setBadge(set.size);
+  refreshBadge();
+}
+
+// The badge counts only unread chats the list shows: cron runs and bot chats
+// only with "Cron runs and bot chats" on, never the older ids of a compressed
+// chat. null until the list first loads, so a launch does not clear it.
+function shownUnread() {
+  if (!LIST.loaded) return null;
+  return PhoneLists.badgeCount(unreadSet(), state.sessions, VIEW.allSources);
+}
+function refreshBadge() {
+  const count = shownUnread();
+  if (count !== null) setBadge(count);
 }
 
 function sessionDot(id) {
@@ -1011,7 +1025,8 @@ async function checkActive() {
   ACTIVE.checking = true;
   try {
     // The unread count lets the Mac's next push carry the right badge.
-    const res = await api("/phone-api/active?unread=" + unreadSet().size);
+    const unread = shownUnread();
+    const res = await api("/phone-api/active" + (unread === null ? "" : "?unread=" + unread));
     if (!res.ok) return;
     const data = await res.json();
     if (!data.active || typeof data.active !== "object") return;
@@ -1028,7 +1043,7 @@ async function checkActive() {
       if (!viewing) set.add(id);
     }
     if (ended) saveUnread(set);
-    setBadge(set.size);
+    refreshBadge();
     if (!$("list-screen").hidden) {
       if (ended) await loadSessions(true).catch(() => renderSessions());
       else paintDots();
@@ -1400,6 +1415,7 @@ function renderSheet() {
         saveView();
         renderSheet();
         renderSessions();
+        refreshBadge();
         // Fewer rows may show now; fetch more pages to fill the screen.
         loadSessions(true).catch(listError);
         return;
@@ -1426,6 +1442,7 @@ function renderSheet() {
     renderSheet();
     state.archived = [];
     renderSessions();
+    refreshBadge();
     if (refill) loadSessions(true).catch(listError);
   });
   body.append(reset);

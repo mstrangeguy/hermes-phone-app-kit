@@ -61,6 +61,19 @@
     return showAll ? list.slice() : list.filter(isOwnChat);
   }
 
+  // Home Screen badge: how many unread ids are rows the main list shows.
+  // Cron runs and bot chats count only while showAll shows them; ids with
+  // no row (older ids of a compressed chat) never count.
+  function badgeCount(unreadIds, rows, showAll) {
+    const unread = new Set(Array.from(unreadIds || []));
+    if (!unread.size) return 0;
+    const shown = new Set();
+    for (const row of mainRows(rows, showAll)) {
+      if (row && unread.has(row.id)) shown.add(row.id);
+    }
+    return shown.size;
+  }
+
   // Paging with client-side filtering: a page of 50 can come back almost
   // empty (a run of cron sessions), so keep asking for the next page until
   // the screen has a full page, the server has no more, or the cap is hit.
@@ -129,7 +142,7 @@
 
   root.PhoneLists = {
     MESSAGING, PLATFORM_LABEL, BOT_CHAT_TITLE,
-    isMessaging, isCron, isBotChat, isOwnChat, mainRows, fillPages, pageStep,
+    isMessaging, isCron, isBotChat, isOwnChat, mainRows, badgeCount, fillPages, pageStep,
     pickBotChat, messagingGroups, jobDot
   };
 })(typeof window !== "undefined" ? window : globalThis);
