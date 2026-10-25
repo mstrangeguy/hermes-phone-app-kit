@@ -203,7 +203,9 @@ const state = {
   hasEarlier: false,
   loadingEarlier: false,
   tail: null,
-  runs: []
+  runs: [],
+  // The open session's pinned and archived flags (session menu).
+  flags: { pinned: false, archived: false }
 };
 
 // The run for a session: the live one, or a finished one still shown there.
@@ -1266,6 +1268,11 @@ function renderSessions() {
     note.textContent = LIST.note;
     root.appendChild(note);
   }
+  if (searching()) {
+    renderSearch(root);
+    root.scrollTop = scroll;
+    return;
+  }
   const list = shownSessions();
   if (!list.length) {
     const empty = document.createElement("div");
@@ -2061,6 +2068,9 @@ async function openSession(id, title, push, profile) {
   state.messages = [];
   state.hasEarlier = false;
   OTHER.busy = null;
+  state.flags = { pinned: false, archived: false };
+  resetReactions(id);
+  resetPlan(id);
   // Pictures waiting in the box belong to the session they were picked in.
   clearTray(true);
   paintSendState();
@@ -2141,6 +2151,8 @@ async function reloadMessages(opts) {
   state.messages = older.concat(fresh);
   if (!older.length) state.hasEarlier = page.more;
   renderTranscript();
+  updatePlanFromMessages();
+  loadReactions();
   if (quiet) return;
   try {
     const info = await api(here("/api/sessions/" + encodeURIComponent(state.sessionId)));
@@ -2148,6 +2160,7 @@ async function reloadMessages(opts) {
     if (info.ok) {
       const body = await info.json();
       const title = body.session && body.session.title;
+      if (body.session) state.flags = { pinned: Boolean(body.session.pinned), archived: Boolean(body.session.archived) };
       if (title) {
         state.title = title;
         $("chat-title").textContent = title;
@@ -2181,6 +2194,7 @@ function historyNode(message, results) {
   const hit = message.id != null ? historyNodes.get(message.id) : null;
   if (hit && hit.sig === sig) return hit.node;
   const node = renderHistoryMessage(message, results || new Map());
+  if (node && reactableRow(message)) node.dataset.row = String(message.id);
   if (message.id != null) historyNodes.set(message.id, { sig, node });
   return node;
 }
@@ -2404,6 +2418,7 @@ function renderTranscript(opts) {
     if (root.children[i] !== node) root.insertBefore(node, root.children[i] || null);
   });
   while (root.children.length > wanted.length) root.lastElementChild.remove();
+  paintAllReacts();
   renderLive(true);
   if (opts && opts.fromBottom != null) root.scrollTop = root.scrollHeight - opts.fromBottom;
   else root.scrollTop = stick ? root.scrollHeight : top;
@@ -2539,7 +2554,8 @@ const PHONE_INSTRUCTIONS =
   "sends are saved on this Mac and listed in the message, one per line, as @file:<path> (before the text) " +
   "or @image:<path> (after it); a path with spaces is wrapped in backticks. Pictures also arrive as images. A file's " +
   "contents are NOT included: open each @file: path with your file tools (read_file, or the pdf skill " +
-  "for PDFs) before answering about it.";
+  "for PDFs) before answering about it. Emoji reactions (react_to_message) cannot attach to messages " +
+  "sent from the phone yet; answer in words instead.";
 
 // Same quoting as Hermes's format_reference_value, so @image:/@file: lines read back whole.
 function refValue(path) {
@@ -3020,6 +3036,13 @@ function paintStep(box, step) {
   icon.textContent = step.state === "running" ? "" : step.state === "failed" ? "✕" : step.state === "called" ? "·" : "✓";
   name.textContent = step.name || "tool";
   sum.textContent = step.summary || "";
+  // A task-list step reads as its progress, not as JSON.
+  const todos = PhoneParts.isTodoTool(step.name) && step.result ? PhoneParts.parseTodos(step.result) : null;
+  if (todos && todos.length) {
+    const prog = PhoneParts.todoProgress(todos);
+    name.textContent = "Tasks";
+    sum.textContent = prog.done + "/" + prog.total + " done" + (prog.current ? " \u00b7 " + prog.current.content : "");
+  }
   meta.textContent = "";
   const diff = EDIT_TOOLS.has(step.name) && step.result ? diffOf(step.result) : "";
   if (diff && step.state !== "failed") meta.append(countsNode(diffStats(diff)));
@@ -3037,6 +3060,11 @@ function paintStep(box, step) {
 
 function fillStepBody(body, step) {
   body._for = step.result;
+  const todos = PhoneParts.isTodoTool(step.name) ? PhoneParts.parseTodos(step.result) : null;
+  if (todos && todos.length) {
+    body.append(todoListNode(todos));
+    return;
+  }
   const diff = EDIT_TOOLS.has(step.name) ? diffOf(step.result) : "";
   if (diff) body.append(diffView(diff));
   else {
@@ -3188,6 +3216,7 @@ async function checkOther() {
     if (data.busy == null) return;
     const was = Boolean(OTHER.busy);
     OTHER.busy = data.busy ? data : null;
+    paintPlan();
     if (OTHER.busy || was) {
       // Busy: the newest rows. Just finished: one full reload for the final answer.
       await reloadMessages({ quiet: Boolean(OTHER.busy) });
@@ -3350,6 +3379,7 @@ function paintRunChrome() {
     other.textContent = "";
   }
   renderApprovals();
+  paintPlan();
 }
 
 // Approvals raised in the desktop app (or any Hermes process running the
@@ -3641,6 +3671,7 @@ function onRunEvent(run, event) {
     const open = run.blocks.find((block) => block.kind === "tool" && block.state === "running" && (!event.tool || block.name === event.tool));
     const dur = event.duration != null ? Number(event.duration) : (open && open.started ? (Date.now() - open.started) / 1000 : 0);
     const failed = Boolean(event.error) || toolFailed(event.preview || "");
+    if (PhoneParts.isTodoTool(event.tool)) refreshPlanSoon(run, event.preview);
     if (open) {
       open.state = failed ? "failed" : "done";
       open.dur = dur;
@@ -3986,12 +4017,20 @@ async function sendMessage(text) {
     run.statusText = REPLYING;
     run.phaseSince = Date.now();
   }
+  // The list on screen belongs to the last turn; this turn shows its own.
+  if (state.sessionId === sessionId) {
+    PLAN.floor = Math.max(PLAN.floor, PLAN.rowId);
+    paintPlan();
+  }
+  let instructions = PHONE_INSTRUCTIONS;
+  const notes = await reactionNotes(run.profile, sessionId);
+  if (notes) instructions += "\n\nSince your last reply, the user reacted:\n" + notes;
   let res;
   try {
     res = await api(inProfile(run.profile, "/v1/runs"), {
       method: "POST",
       headers: { "Idempotency-Key": crypto.randomUUID() },
-      body: JSON.stringify({ input, session_id: sessionId, instructions: PHONE_INSTRUCTIONS })
+      body: JSON.stringify({ input, session_id: sessionId, instructions })
     });
   } catch (e) {
     if (e.status === 401) {
@@ -4052,6 +4091,8 @@ function paintMenu(mode) {
   menuError("");
   const busy = sessionBusy();
   $("menu-fork").disabled = busy;
+  $("menu-pin").textContent = state.flags.pinned ? "Unpin" : "Pin";
+  $("menu-archive").textContent = state.flags.archived ? "Unarchive" : "Archive";
   $("menu-delete").disabled = busy;
   $("menu-hint").textContent = busy
     ? "Fork and Delete are available when the reply finishes."
@@ -4268,6 +4309,486 @@ $("rename-form").addEventListener("submit", (event) => {
     toggleMenu(false);
   });
 });
+
+// --- Reactions ------------------------------------------------------------------
+// Tapbacks, as in the desktop app and iMessage: double-tap a message for the
+// six reactions; one per author, tap yours again to take it back. The Mac
+// keeps them in Hermes's own store (/phone-api/reactions), so the desktop shows
+// them too. Your reactions are told to the agent once, with your next message.
+const REACT = { enabled: false, map: new Map(), unseen: false, seq: 0, sessionId: null };
+const TAP = PhoneParts.tapDetector(320, 30);
+const REACT_WHO = { user: "You", agent: "Hermes" };
+
+function reactableRow(message) {
+  if (!message || message.id == null) return false;
+  if (message.role === "user") return realUser(message);
+  return message.role === "assistant" && Boolean(textOf(message.content).trim()) && !toolCallsOf(message).length;
+}
+
+function resetReactions(id) {
+  REACT.seq++;
+  REACT.sessionId = id;
+  REACT.map = new Map();
+  REACT.unseen = false;
+  closeTapback();
+}
+
+async function loadReactions() {
+  const id = state.sessionId;
+  const profile = state.profile;
+  const ids = state.messages.filter(reactableRow).map((m) => m.id).slice(-300);
+  if (!id || !ids.length) return;
+  const seq = ++REACT.seq;
+  try {
+    const res = await api("/phone-api/reactions?profile=" + encodeURIComponent(profile) +
+      "&session=" + encodeURIComponent(id) + "&ids=" + ids.join(","));
+    if (!res.ok || seq !== REACT.seq || state.sessionId !== id) return;
+    const data = await res.json();
+    if (seq !== REACT.seq || state.sessionId !== id) return;
+    REACT.enabled = Boolean(data.enabled);
+    REACT.map = new Map(Object.entries(data.reactions || {}).map(([k, v]) => [Number(k), Array.isArray(v) ? v : []]));
+    REACT.unseen = [...REACT.map.values()].some((list) => list.some((r) => r.new));
+    paintAllReacts();
+  } catch (e) {
+    // Quiet: the chat works without reactions.
+  }
+}
+
+function paintAllReacts() {
+  for (const node of document.querySelectorAll("#transcript [data-row]")) paintReacts(node);
+}
+
+function paintRowReacts(rowId) {
+  const node = document.querySelector('#transcript [data-row="' + rowId + '"]');
+  if (node) paintReacts(node);
+}
+
+function paintReacts(node) {
+  const rowId = Number(node.dataset.row);
+  const list = REACT.enabled ? (REACT.map.get(rowId) || []) : [];
+  let box = null;
+  for (const child of node.children) if (child.classList.contains("reacts")) box = child;
+  const sig = list.map((r) => r.author + ":" + r.emoji).join(",");
+  if (!list.length) {
+    if (box) box.remove();
+    return;
+  }
+  if (box && box.dataset.sig === sig) return;
+  if (!box) {
+    box = document.createElement("div");
+    box.className = "reacts";
+    node.append(box);
+  }
+  box.dataset.sig = sig;
+  box.textContent = "";
+  for (const r of list) {
+    const pill = document.createElement("button");
+    pill.type = "button";
+    pill.className = "react-pill" + (r.author === "user" ? " mine" : " agent");
+    pill.textContent = r.emoji;
+    const who = REACT_WHO[r.author] || r.author;
+    pill.setAttribute("aria-label", who + " reacted " + r.emoji + (r.author === "user" ? ". Tap to take it back." : ""));
+    pill.addEventListener("click", () => {
+      if (r.author === "user") setReaction(rowId, null);
+      else openTapback(node);
+    });
+    box.append(pill);
+  }
+}
+
+function closeTapback() {
+  const bar = $("tapback");
+  if (bar) bar.remove();
+  for (const node of document.querySelectorAll("#transcript .tapped")) node.classList.remove("tapped");
+}
+
+function openTapback(node, tapY) {
+  closeTapback();
+  if (!REACT.enabled) return;
+  const rowId = Number(node.dataset.row);
+  const current = PhoneParts.mine(REACT.map.get(rowId));
+  const bar = document.createElement("div");
+  bar.id = "tapback";
+  bar.className = "tapback";
+  bar.setAttribute("role", "toolbar");
+  bar.setAttribute("aria-label", "React to this message");
+  for (const emoji of PhoneParts.QUICK_REACTIONS) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "tap-emoji" + (emoji === current ? " on" : "");
+    button.textContent = emoji;
+    button.setAttribute("aria-pressed", emoji === current ? "true" : "false");
+    button.addEventListener("click", () => {
+      closeTapback();
+      setReaction(rowId, emoji === current ? null : emoji);
+    });
+    bar.append(button);
+  }
+  bar.dataset.top = String($("transcript").scrollTop);
+  document.body.append(bar);
+  node.classList.add("tapped");
+  // Just above where you tapped (long replies are taller than the screen),
+  // or above the message from a pill; below when there is no room.
+  const target = (node.querySelector(".bubble, .assistant") || node).getBoundingClientRect();
+  const area = $("transcript").getBoundingClientRect();
+  const width = bar.offsetWidth;
+  const height = bar.offsetHeight;
+  const anchor = tapY != null ? tapY : Math.max(target.top, area.top + height + 10);
+  let top = anchor - height - 14;
+  if (top < area.top + 4) top = Math.min(anchor + 18, area.bottom - height - 4);
+  const mineSide = node.classList.contains("user");
+  let left = mineSide ? target.right - width : target.left;
+  left = Math.max(8, Math.min(left, window.innerWidth - width - 8));
+  bar.style.top = Math.round(top) + "px";
+  bar.style.left = Math.round(left) + "px";
+}
+
+async function setReaction(rowId, emoji) {
+  const id = state.sessionId;
+  const profile = state.profile;
+  const before = REACT.map.get(rowId) || [];
+  // Paint first; the Mac's answer wins. A load in flight is now stale.
+  REACT.seq++;
+  REACT.map.set(rowId, PhoneParts.applyReaction(before, emoji, "user"));
+  paintRowReacts(rowId);
+  try {
+    const res = await api("/phone-api/reactions?profile=" + encodeURIComponent(profile), {
+      method: "POST",
+      body: JSON.stringify({ session: id, row_id: rowId, emoji })
+    });
+    if (!res.ok) throw new Error(await errorMessage(res));
+    const data = await res.json();
+    if (state.sessionId !== id) return;
+    REACT.map.set(rowId, Array.isArray(data.reactions) ? data.reactions : []);
+    if (emoji) REACT.unseen = true;
+  } catch (e) {
+    if (state.sessionId !== id) return;
+    REACT.map.set(rowId, before);
+    if (e.status !== 401) notice(e.message || "Could not react");
+  }
+  paintRowReacts(rowId);
+}
+
+// Reactions you made since the agent last heard from you, as the desktop's
+// "[The user reacted ...]" notes, marked told on the Mac. "" when none.
+async function reactionNotes(profile, sessionId) {
+  if (!REACT.enabled || !REACT.unseen || state.sessionId !== sessionId) return "";
+  try {
+    const res = await api("/phone-api/reactions/unseen?profile=" + encodeURIComponent(profile), {
+      method: "POST",
+      body: JSON.stringify({ session: sessionId })
+    });
+    if (!res.ok) return "";
+    const data = await res.json();
+    REACT.unseen = false;
+    for (const list of REACT.map.values()) for (const r of list) delete r.new;
+    return typeof data.notes === "string" ? data.notes : "";
+  } catch (e) {
+    return "";
+  }
+}
+
+$("transcript").addEventListener("pointerup", (event) => {
+  if (event.pointerType === "mouse" && event.button !== 0) return;
+  const target = event.target;
+  if (!target || !target.closest) return;
+  const node = target.closest("[data-row]");
+  if (!node || target.closest("a, button, input, textarea, select, pre, summary, img, .step, .reacts")) return;
+  if (!TAP(event.clientX, event.clientY, event.timeStamp)) return;
+  if (!REACT.enabled) return;
+  // A double tap on text may also select a word; the tapback is what was meant.
+  if (window.getSelection) window.getSelection().removeAllRanges();
+  openTapback(node, event.clientY);
+});
+// A real scroll closes it; the small nudges of a reload or a layout change do not.
+$("transcript").addEventListener("scroll", () => {
+  const bar = $("tapback");
+  if (bar && Math.abs($("transcript").scrollTop - Number(bar.dataset.top || 0)) > 12) closeTapback();
+}, { passive: true });
+document.addEventListener("pointerdown", (event) => {
+  const bar = $("tapback");
+  if (bar && !bar.contains(event.target)) closeTapback();
+}, true);
+
+// --- Task list -------------------------------------------------------------------
+// The agent's todo list, after the desktop's status stack: a card above the
+// message box with progress and the step in hand; tap it for the whole list.
+// It shows while a reply runs (here or on the desktop), then stays, folded,
+// for that turn's list until you close it or send the next message.
+const PLAN = { sessionId: null, todos: null, rowId: 0, floor: 0, open: false, sig: "", timer: 0 };
+const PLAN_CLOSED = "hermes.phone.planClosed";
+
+function planClosedSet() {
+  try { return new Set(JSON.parse(localStorage.getItem(PLAN_CLOSED) || "[]")); }
+  catch (e) { return new Set(); }
+}
+
+function resetPlan(id) {
+  PLAN.sessionId = id;
+  PLAN.todos = null;
+  PLAN.rowId = 0;
+  PLAN.floor = 0;
+  PLAN.open = false;
+  PLAN.sig = "";
+  paintPlan();
+}
+
+function planFrom(rows) {
+  const found = PhoneParts.latestTodos(rows);
+  if (!found) return false;
+  PLAN.todos = found.todos;
+  PLAN.rowId = found.rowId;
+  return true;
+}
+
+function updatePlanFromMessages() {
+  if (PLAN.sessionId !== state.sessionId) resetPlan(state.sessionId);
+  planFrom(state.messages);
+  paintPlan();
+}
+
+// A todo step finished in a reply on screen: read the newest rows for the list.
+function refreshPlanSoon(run, preview) {
+  if (!run || run.sessionId !== state.sessionId) return;
+  const quick = PhoneParts.parseTodos(preview || "");
+  if (quick && quick.length) {
+    // Newer than anything on screen until the stored row is read.
+    PLAN.todos = quick;
+    PLAN.rowId = Math.max(PLAN.rowId, PLAN.floor, lastUserRowId()) + 0.5;
+    paintPlan();
+  }
+  clearTimeout(PLAN.timer);
+  PLAN.timer = setTimeout(async () => {
+    const id = state.sessionId;
+    try {
+      const res = await api(messagesPath(id, 0, 30));
+      if (!res.ok || state.sessionId !== id) return;
+      const data = await res.json();
+      if (state.sessionId !== id) return;
+      if (planFrom(Array.isArray(data.data) ? data.data : [])) paintPlan();
+    } catch (e) {}
+  }, 500);
+}
+
+function planWorking() {
+  return Boolean(liveRun(state.sessionId) || OTHER.busy);
+}
+
+function lastUserRowId() {
+  let last = 0;
+  for (const m of state.messages) if (realUser(m) && Number(m.id) > last) last = Number(m.id);
+  return last;
+}
+
+function todoMark(status) {
+  return { completed: "\u2713", cancelled: "\u2298", in_progress: "\u25d0", pending: "\u25cb" }[status] || "\u25cb";
+}
+
+function todoListNode(todos) {
+  const list = document.createElement("ul");
+  list.className = "todo-list";
+  for (const [todo, depth] of PhoneParts.todoTree(todos)) {
+    const item = document.createElement("li");
+    item.className = "todo " + todo.status;
+    if (depth) item.style.paddingLeft = (depth * 18) + "px";
+    const mark = document.createElement("span");
+    mark.className = "todo-mark";
+    mark.setAttribute("aria-hidden", "true");
+    mark.textContent = todoMark(todo.status);
+    const text = document.createElement("span");
+    text.className = "todo-text";
+    text.textContent = todo.content;
+    item.setAttribute("aria-label", todo.status.replace("_", " ") + ": " + todo.content);
+    item.append(mark, text);
+    list.append(item);
+  }
+  return list;
+}
+
+function paintPlan() {
+  const box = $("plan");
+  if (!box) return;
+  const working = planWorking();
+  const key = state.sessionId + ":" + PLAN.rowId;
+  const dismissed = planClosedSet().has(key);
+  const visible = PLAN.sessionId === state.sessionId &&
+    PhoneParts.planVisible(PLAN, { working, dismissed, lastUserRowId: lastUserRowId(), floorRowId: PLAN.floor });
+  const sig = visible ? JSON.stringify([PLAN.todos, PLAN.open, working]) : "";
+  if (sig === PLAN.sig && box.hidden === !visible) return;
+  PLAN.sig = sig;
+  box.hidden = !visible;
+  box.textContent = "";
+  if (!visible) return;
+  const prog = PhoneParts.todoProgress(PLAN.todos);
+  const finished = prog.total > 0 && prog.open === 0;
+  box.classList.toggle("done", finished);
+  box.classList.toggle("open", PLAN.open);
+  const head = document.createElement("button");
+  head.type = "button";
+  head.className = "plan-head";
+  head.setAttribute("aria-expanded", PLAN.open ? "true" : "false");
+  const icon = document.createElement("span");
+  icon.className = "plan-ico";
+  icon.setAttribute("aria-hidden", "true");
+  icon.textContent = "\u2611";
+  const count = document.createElement("span");
+  count.className = "plan-count";
+  count.textContent = prog.done + "/" + prog.total;
+  const now = document.createElement("span");
+  now.className = "plan-now";
+  now.textContent = finished ? "All done" : prog.current ? prog.current.content : (prog.open + " to go");
+  const chev = document.createElement("span");
+  chev.className = "chev";
+  chev.setAttribute("aria-hidden", "true");
+  chev.textContent = "\u203a";
+  head.append(icon, count, now, chev);
+  head.setAttribute("aria-label", "Tasks: " + prog.done + " of " + prog.total + " done" + (prog.current ? ", now: " + prog.current.content : ""));
+  head.addEventListener("click", () => {
+    PLAN.open = !PLAN.open;
+    paintPlan();
+  });
+  const bar = document.createElement("div");
+  bar.className = "plan-bar";
+  const fill = document.createElement("div");
+  fill.className = "plan-fill";
+  fill.style.width = (prog.total ? Math.round(100 * prog.done / prog.total) : 0) + "%";
+  bar.append(fill);
+  const top = document.createElement("div");
+  top.className = "plan-top";
+  top.append(head);
+  if (!working) {
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "plan-close";
+    close.setAttribute("aria-label", "Hide this task list");
+    close.textContent = "\u00d7";
+    close.addEventListener("click", () => {
+      const set = planClosedSet();
+      set.add(key);
+      try { localStorage.setItem(PLAN_CLOSED, JSON.stringify([...set].slice(-50))); } catch (e) {}
+      paintPlan();
+    });
+    top.append(close);
+  }
+  box.append(top, bar);
+  if (PLAN.open) {
+    const body = document.createElement("div");
+    body.className = "plan-body";
+    body.append(todoListNode(PLAN.todos));
+    box.append(body);
+  }
+}
+
+// --- Search ----------------------------------------------------------------------
+// Titles and message text, across every chat in the profiles in view (not just
+// the loaded page), searched on the Mac. Results replace the list until the box
+// is cleared.
+const SEARCH = { q: "", seq: 0, results: null, pending: false, timer: 0 };
+
+function searchInput() {
+  const q = $("search").value.trim();
+  SEARCH.q = q;
+  clearTimeout(SEARCH.timer);
+  if (q.length < 2) {
+    SEARCH.seq++;
+    SEARCH.results = null;
+    SEARCH.pending = false;
+    renderSessions();
+    return;
+  }
+  SEARCH.pending = true;
+  if (!SEARCH.results) SEARCH.results = [];
+  renderSessions();
+  SEARCH.timer = setTimeout(runSearch, 250);
+}
+
+async function runSearch() {
+  const q = SEARCH.q;
+  const seq = ++SEARCH.seq;
+  const profiles = viewProfiles();
+  let rows = [];
+  let failed = false;
+  try {
+    const lists = await Promise.all(profiles.map(async (profile) => {
+      const res = await api("/phone-api/search?profile=" + encodeURIComponent(profile) + "&q=" + encodeURIComponent(q));
+      if (!res.ok) { failed = true; return []; }
+      const data = await res.json();
+      return (Array.isArray(data.results) ? data.results : []).map((r) => Object.assign(r, { _profile: profile }));
+    }));
+    rows = lists.flat();
+  } catch (e) {
+    if (e.status === 401) return;
+    failed = true;
+  }
+  if (seq !== SEARCH.seq) return;
+  rows.sort((a, b) => stampMs(b.last_active || b.started_at) - stampMs(a.last_active || a.started_at));
+  SEARCH.results = PhoneParts.searchRows(rows, VIEW.allSources);
+  SEARCH.failed = failed;
+  SEARCH.pending = false;
+  renderSessions();
+}
+
+function searching() {
+  return SEARCH.q.length >= 2 && SEARCH.results != null;
+}
+
+function renderSearch(root) {
+  const head = document.createElement("div");
+  head.className = "bucket";
+  head.textContent = "Search results";
+  root.append(head);
+  if (SEARCH.pending && !SEARCH.results.length) {
+    const wait = document.createElement("div");
+    wait.className = "empty";
+    wait.textContent = "Searching\u2026";
+    root.append(wait);
+    return;
+  }
+  if (!SEARCH.results.length) {
+    const none = document.createElement("div");
+    none.className = "empty";
+    none.textContent = SEARCH.failed ? "Search did not answer. Try again." : "No chats match.";
+    root.append(none);
+    return;
+  }
+  for (const session of SEARCH.results) root.append(sessionButton(session));
+}
+
+$("search").addEventListener("input", searchInput);
+$("search").addEventListener("search", searchInput);
+$("search").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") $("search").blur();
+});
+
+// --- Pin and archive -------------------------------------------------------------
+// The desktop sidebar's Pin and Archive, from the session menu. Hermes keeps
+// both flags, so the desktop and the phone list agree.
+async function setSessionFlag(flag) {
+  const value = !state.flags[flag];
+  const res = await api(here("/api/sessions/" + encodeURIComponent(state.sessionId)), {
+    method: "PATCH",
+    body: JSON.stringify({ [flag]: value })
+  });
+  if (!res.ok) throw new Error(await errorMessage(res));
+  state.flags[flag] = value;
+  toggleMenu(false);
+  notice(flag === "pinned"
+    ? (value ? "Pinned. It stays at the top of the list." : "Unpinned.")
+    : (value ? "Archived. Find it under View \u2192 Show \u2192 Archived." : "Back in the list."));
+  loadSessions(true).catch(() => {});
+}
+
+// The title opens the same menu: on some phones the top-right corner, where
+// the ••• button sits, is under the camera.
+$("chat-title").addEventListener("click", () => toggleMenu());
+$("chat-title").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    toggleMenu();
+  }
+});
+$("menu-pin").addEventListener("click", () => menuAction($("menu-pin"), () => setSessionFlag("pinned")));
+$("menu-archive").addEventListener("click", () => menuAction($("menu-archive"), () => setSessionFlag("archived")));
 
 function showList() {
   DRAWER.mode = "sessions";

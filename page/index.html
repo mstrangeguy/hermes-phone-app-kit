@@ -85,6 +85,9 @@
         New session
       </button>
     </div>
+    <div class="search-row">
+      <input id="search" type="search" placeholder="Search chats" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="search" aria-label="Search chats">
+    </div>
     <div class="list" id="session-list"></div>
   </section>
 
@@ -149,7 +152,7 @@
       <button class="icon" type="button" id="back" aria-label="Sessions">
         <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M11.5 3.5 6 9l5.5 5.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </button>
-      <div class="title grow" id="chat-title">Hermes</div>
+      <div class="title grow" id="chat-title" role="button" tabindex="0" aria-haspopup="true" aria-controls="menu">Hermes</div>
       <span class="tag" id="chat-profile" hidden></span>
       <button class="icon" type="button" id="menu-btn" aria-label="Session actions" aria-expanded="false" aria-controls="menu">
         <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><circle cx="3.5" cy="9" r="1.6" fill="currentColor"/><circle cx="9" cy="9" r="1.6" fill="currentColor"/><circle cx="14.5" cy="9" r="1.6" fill="currentColor"/></svg>
@@ -161,6 +164,10 @@
           <button class="textbtn" type="button" id="menu-rename">Rename</button>
           <button class="textbtn" type="button" id="menu-fork">Fork</button>
           <button class="textbtn deny" type="button" id="menu-delete">Delete</button>
+        </div>
+        <div class="menu-row">
+          <button class="textbtn" type="button" id="menu-pin">Pin</button>
+          <button class="textbtn" type="button" id="menu-archive">Archive</button>
         </div>
         <div class="menu-hint" id="menu-hint"></div>
       </div>
@@ -182,6 +189,7 @@
     <div class="composer">
       <div class="banner" id="other-run" hidden></div>
       <div class="notice" id="notice" hidden></div>
+      <div class="plan" id="plan" hidden></div>
       <div id="approvals"></div>
       <div class="tray" id="tray" hidden></div>
       <form id="composer" class="composer-surface">
@@ -203,6 +211,7 @@
 <script src="vendor/purify.min.js"></script>
 <script src="vendor/marked.umd.js"></script>
 <script src="lists.js"></script>
+<script src="chatparts.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

@@ -50,9 +50,13 @@ header.bar {
   align-items: center;
   gap: 8px;
   min-height: 48px;
-  padding: calc(8px + var(--safe-top)) 12px 8px;
+  /* Side insets too: a camera or sensor cut into a corner reports them. */
+  padding: calc(8px + var(--safe-top)) max(12px, env(safe-area-inset-right)) 8px max(12px, env(safe-area-inset-left));
   background: var(--sidebar);
 }
+/* The chat title opens the session menu too, away from the top-right corner. */
+#chat-title { cursor: pointer; -webkit-tap-highlight-color: transparent; }
+#chat-title:active { opacity: 0.6; }
 #chat-screen header.bar {
   background: var(--bg);
   border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
@@ -741,3 +745,62 @@ button.bucket.group::after { order: 3; }
   position: absolute; top: calc(10px + var(--safe-top)); right: 12px; width: 40px; height: 40px; padding: 0;
   border: 0; border-radius: 999px; background: rgba(255, 255, 255, 0.16); color: #fff; font-size: 24px; line-height: 40px;
 }
+
+/* Search: one box above the list, results replace the list while it has text. */
+.search-row { padding: 0 8px 6px; }
+.search-row input {
+  width: 100%; min-height: 36px; padding: 0 12px; border-radius: 10px; font-size: 16px;
+  border: 1px solid var(--border); background: var(--bg); color: var(--fg); -webkit-appearance: none; appearance: none;
+}
+.search-row input:focus { outline: none; border-color: var(--primary); }
+
+/* Reactions: double-tap a message for the six Tapbacks; pills under it. */
+.transcript { touch-action: manipulation; }
+.msg.tapped .bubble, .msg.tapped .assistant { outline: 2px solid color-mix(in srgb, var(--primary) 55%, transparent); outline-offset: 3px; border-radius: 12px; }
+.tapback {
+  position: fixed; z-index: 40; display: flex; gap: 2px; padding: 4px 6px; border-radius: 999px;
+  background: var(--sidebar); border: 1px solid var(--border); box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+  animation: tapback-in 0.12s ease-out;
+}
+.tap-emoji { appearance: none; border: 0; background: none; font-size: 24px; line-height: 1; width: 42px; height: 42px; border-radius: 50%; }
+.tap-emoji.on { background: color-mix(in srgb, var(--primary) 35%, transparent); }
+.tap-emoji:active { transform: scale(1.18); }
+@keyframes tapback-in { from { opacity: 0; transform: translateY(4px) scale(0.96); } }
+@media (prefers-reduced-motion: reduce) { .tapback { animation: none; } }
+.reacts { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.msg.user .reacts { justify-content: flex-end; }
+.react-pill {
+  appearance: none; display: inline-flex; align-items: center; min-height: 26px; padding: 0 8px; border-radius: 999px;
+  font-size: 14px; line-height: 1; border: 1px solid var(--border); background: var(--sidebar); color: var(--fg);
+}
+.react-pill.mine { border-color: color-mix(in srgb, var(--primary) 60%, transparent); background: color-mix(in srgb, var(--primary) 18%, var(--sidebar)); }
+
+/* Task list card above the message box, after the desktop's status stack. */
+.plan { margin: 0 0 8px; border: 1px solid var(--border); border-radius: 12px; background: var(--sidebar); overflow: hidden; }
+.plan[hidden] { display: none; }
+.plan-top { display: flex; align-items: center; }
+.plan-head {
+  appearance: none; flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 6px 10px;
+  border: 0; background: none; color: var(--fg); text-align: left; font-size: 13.5px;
+}
+.plan-ico { flex: none; color: var(--primary); }
+.plan.done .plan-ico { color: #3fb950; }
+.plan-count { flex: none; font-weight: 600; font-variant-numeric: tabular-nums; }
+.plan-now { flex: 1; min-width: 0; color: var(--muted-fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.plan-head .chev { flex: none; color: var(--muted-fg); transition: transform 0.15s; }
+.plan.open .plan-head .chev { transform: rotate(90deg); }
+.plan-close { appearance: none; flex: none; width: 36px; height: 36px; border: 0; background: none; color: var(--muted-fg); font-size: 18px; }
+.plan-bar { height: 3px; background: color-mix(in srgb, var(--border) 70%, transparent); }
+.plan-fill { height: 100%; background: var(--primary); transition: width 0.3s ease; }
+.plan.done .plan-fill { background: #3fb950; }
+.plan-body { max-height: 38vh; overflow-y: auto; overscroll-behavior-y: contain; padding: 6px 10px 8px; }
+.todo-list { list-style: none; margin: 0; padding: 0; }
+.todo { display: flex; gap: 8px; align-items: baseline; padding: 3px 0; font-size: 13.5px; }
+.todo-mark { flex: none; width: 14px; text-align: center; color: var(--muted-fg); }
+.todo.completed .todo-mark { color: #3fb950; }
+.todo.in_progress .todo-mark { color: var(--primary); animation: sdot-pulse 1.6s ease-in-out infinite; }
+.todo.in_progress .todo-text { font-weight: 600; }
+.todo.completed .todo-text { color: var(--muted-fg); }
+.todo.cancelled .todo-text { color: var(--muted-fg); text-decoration: line-through; }
+.step-body .todo-list { padding: 4px 2px; }
+@media (prefers-reduced-motion: reduce) { .todo.in_progress .todo-mark { animation: none; } .plan-fill { transition: none; } }

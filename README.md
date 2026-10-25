@@ -52,6 +52,13 @@ View options → Show → **Cron runs and bot chats** (off by default, kept on t
 
 Not on the phone (desktop only): Bot Mode group chats and rooms, bot avatars, creating or editing Bot Chats and cron jobs.
 
+In a chat:
+
+- **Search.** The box above the Sessions list searches chat titles and message text across every chat in the profiles in view, not just the loaded ones. Results replace the list until you clear the box.
+- **Reactions.** Double-tap a message for the six Tapbacks (❤️ 👍 👎 😂 ‼️ ❓). Tap your own reaction to take it back. They are the desktop app's reactions, kept in Hermes, so both apps show them, and Hermes's own reactions appear too. Your reactions are passed to the agent with your next message, as the desktop does. They follow the desktop setting Settings → Appearance → message reactions (`display.message_reactions` in that profile's `config.yaml`); with it off, the phone hides them. The agent cannot react to a message sent from the phone yet: on the API server, Hermes looks the message up under the run, not the chat.
+- **Task list.** When the agent keeps a task list, a card above the message box shows progress ("3/7") and the step in hand; tap it for the whole list. It shows while a reply runs, here or on the desktop, and stays after for that turn until you close it. Task-list steps in the chat read as progress and open as a checklist.
+- **Pin and Archive** are in the session menu, next to Rename, Fork and Delete. Open it with ••• or by tapping the chat's title (handy when a phone's camera sits over the top-right corner). Archived chats are under View → Show → Archived.
+
 If the code expired: `cd ~/.hermes/phone-chat && scripts/py -I serve.py --setup-code`
 
 If the page does not load with iCloud Private Relay on, add this to the tailnet policy file (admin console → Access controls → JSON editor), as its own section beside `acls`. Then turn Tailscale off and on again on the phone.
@@ -102,6 +109,7 @@ This app is a remote control for an agent that can run commands on your Mac. Rea
 - With Face ID enrolled, the phone never holds the Hermes API key. The Mac adds it to each request. Opening the app runs Face ID with no tap (iOS allows one such prompt per page load; if it refuses, tap Unlock). The app locks as soon as it leaves the screen, and after 10 minutes without a touch; replies keep running on the Mac. The Mac also ends an unlock after 30 minutes idle or 12 hours. Allow once needs a fresh Face ID check tied to that one prompt. Deny never needs it.
 - The page loads nothing from other sites. Its content policy blocks inline scripts, and model output is cleaned before display.
 - Attachments (the + in the message box opens the iOS picker: Photo Library, Take Photo, Choose File) are saved where the Hermes desktop app saves its own: pictures in `<Hermes home>/images/`, other files in `<Hermes home>/attachments/` under their own name (never overwriting; files 600). A photo is shrunk on the phone first, which also drops its location data. Files are sent unchanged, up to 25 MB. The message lists them as the desktop's `@image:` / `@file:` lines, so both apps show them from history; Hermes opens a file with its own tools when it reads the message. Delete old ones there whenever you like. Pictures Hermes sends back (`MEDIA:/path` in a reply) are fetched through the proxy: image files only, judged by their contents, from your home or temp folders only, behind the same login and Face ID checks. Paths are never logged.
+- The proxy reads Hermes's session database directly for the list extras, cron runs and search (read-only), and writes to it in one place only: the reactions field of a message, when you react. Hermes's own API has no reaction or full-text search routes. Search queries are not logged.
 - If this Mac is managed by an employer, check with them before opening a remote path into it.
 
 ## Everyday commands

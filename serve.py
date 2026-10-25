@@ -214,6 +214,7 @@ STATIC = {
     "/": ("page/index.html", "text/html; charset=utf-8"),
     "/app.js": ("page/app.js", "text/javascript; charset=utf-8"),
     "/lists.js": ("page/lists.js", "text/javascript; charset=utf-8"),
+    "/chatparts.js": ("page/chatparts.js", "text/javascript; charset=utf-8"),
     "/app.css": ("page/app.css", "text/css; charset=utf-8"),
     "/vendor/marked.umd.js": ("page/vendor/marked.umd.js", "text/javascript; charset=utf-8"),
     "/vendor/purify.min.js": ("page/vendor/purify.min.js", "text/javascript; charset=utf-8"),
@@ -957,6 +958,348 @@ def serve_busy(client, target, lines):
     send_response(client, 200, "OK", body, "application/json")
 
 
+# --- Reactions ------------------------------------------------------------------
+# Tapbacks, as in the Hermes desktop app: one emoji per author per message,
+# stored in the message row's display_metadata under "reactions" (Hermes's own
+# store, so the desktop shows phone reactions and the reverse). Hermes's API
+# server does not return or set them, so the proxy reads and writes that one
+# field. Gated, like the desktop, on display.message_reactions in the
+# profile's config.yaml. A user reaction is announced to the agent once, on
+# the next message (the desktop's "[The user reacted ...]" note).
+
+REACTIONS_PATH = "/phone-api/reactions"
+REACTIONS_UNSEEN_PATH = "/phone-api/reactions/unseen"
+# The six iOS Tapbacks, in Apple's order (the desktop's QUICK_REACTIONS).
+QUICK_REACTIONS = ("\u2764\ufe0f", "\U0001f44d", "\U0001f44e", "\U0001f602", "\u203c\ufe0f", "\u2753")
+ACTIVE_ROWS = " AND (active = 1 OR compacted = 1)"
+_reaction_flags = {}
+
+
+def reactions_enabled(profile):
+    """display.message_reactions from the profile's config.yaml (default off, as in Hermes)."""
+    home = profile_home(profile)
+    path = os.path.join(home, "config.yaml") if home else ""
+    try:
+        stamp = os.stat(path).st_mtime
+    except OSError:
+        return False
+    cached = _reaction_flags.get(path)
+    if cached and cached[0] == stamp:
+        return cached[1]
+    value = False
+    try:
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+        try:
+            import yaml
+            display = (yaml.safe_load(text) or {}).get("display")
+            value = bool(isinstance(display, dict) and display.get("message_reactions", False))
+        except ImportError:
+            block = re.search(r"^display:\s*\n((?:[ \t]+.*\n?)*)", text, re.M)
+            value = bool(block and re.search(r"^\s+message_reactions:\s*(true|yes|on)\s*$", block.group(1), re.M | re.I))
+    except (OSError, ValueError, AttributeError):
+        value = False
+    _reaction_flags[path] = (stamp, value)
+    return value
+
+
+def display_meta(raw):
+    """display_metadata as a dict. Older rows carry a second JSON string layer."""
+    meta = raw
+    for _ in range(3):
+        if isinstance(meta, bytes):
+            meta = meta.decode("utf-8", "replace")
+        if not isinstance(meta, str):
+            break
+        try:
+            meta = json.loads(meta)
+        except ValueError:
+            return None
+    return meta if isinstance(meta, dict) else None
+
+
+def reaction_list(meta):
+    items = (meta or {}).get("reactions")
+    return [r for r in items if isinstance(r, dict)] if isinstance(items, list) else []
+
+
+def public_reactions(items):
+    """Emoji and author only. "new": a reaction of yours the agent has not been told about yet."""
+    out = []
+    for r in items:
+        if not r.get("emoji"):
+            continue
+        row = {"emoji": str(r.get("emoji")), "author": str(r.get("author") or "")}
+        if row["author"] == "user" and not r.get("seen"):
+            row["new"] = True
+        out.append(row)
+    return out
+
+
+def session_rows_scope(conn, session_id):
+    """The session ids whose rows a resume of *session_id* shows: its compression lineage."""
+    return lineage_ids(conn, lease_root(conn, session_id))
+
+
+def read_reactions(profile, session_id, row_ids):
+    """{row_id: [{emoji, author}]} for the rows of this conversation that carry reactions."""
+    ids = [int(i) for i in row_ids if str(i).isdigit()][:500]
+    if not ids:
+        return {}
+    conn = ro_connect(profile_file(profile, "state.db", STATE_DB))
+    try:
+        scope = session_rows_scope(conn, session_id)
+        rows = conn.execute(
+            "SELECT id, display_metadata FROM messages WHERE id IN (%s) AND session_id IN (%s)%s "
+            "AND display_metadata LIKE '%%reactions%%'" % (",".join("?" * len(ids)), ",".join("?" * len(scope)), ACTIVE_ROWS),
+            (*ids, *scope)).fetchall()
+    finally:
+        conn.close()
+    out = {}
+    for row_id, raw in rows:
+        items = public_reactions(reaction_list(display_meta(raw)))
+        if items:
+            out[str(row_id)] = items
+    return out
+
+
+def rw_connect(path):
+    """Writable, waiting politely for Hermes's own writers."""
+    conn = sqlite3.connect(path, timeout=10, isolation_level=None)
+    conn.execute("PRAGMA busy_timeout = 10000")
+    return conn
+
+
+def set_reaction(profile, session_id, row_id, emoji):
+    """Tapback semantics: one per author; the same emoji again clears it. None if the row is not this chat's."""
+    conn = rw_connect(profile_file(profile, "state.db", STATE_DB))
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        scope = session_rows_scope(conn, session_id)
+        row = conn.execute("SELECT display_metadata FROM messages WHERE id = ? AND session_id IN (%s)%s"
+                           % (",".join("?" * len(scope)), ACTIVE_ROWS), (row_id, *scope)).fetchone()
+        if row is None:
+            conn.execute("ROLLBACK")
+            return None
+        meta = display_meta(row[0]) or {}
+        existing = reaction_list(meta)
+        mine = next((r for r in existing if r.get("author") == "user"), None)
+        reactions = [r for r in existing if r.get("author") != "user"]
+        if emoji and (mine is None or mine.get("emoji") != emoji):
+            reactions.append({"emoji": emoji, "author": "user", "at": time.time()})
+        if reactions:
+            meta["reactions"] = reactions
+        else:
+            meta.pop("reactions", None)
+        conn.execute("UPDATE messages SET display_metadata = ? WHERE id = ?",
+                     (json.dumps(meta, ensure_ascii=False) if meta else None, row_id))
+        conn.execute("COMMIT")
+        return public_reactions(reactions)
+    except sqlite3.Error:
+        with _suppress():
+            conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+
+
+def message_text(raw):
+    """Plain text of a stored message (content may be a JSON list of parts)."""
+    if not isinstance(raw, str):
+        return ""
+    if raw[:1] in "[{":
+        try:
+            parts = json.loads(raw)
+        except ValueError:
+            return raw
+        if isinstance(parts, list):
+            return " ".join(str(p.get("text") or "") for p in parts if isinstance(p, dict))
+    return raw
+
+
+def take_unseen_reactions(profile, session_id):
+    """The user's reactions not yet told to the agent, marked told. Hermes's note text."""
+    conn = rw_connect(profile_file(profile, "state.db", STATE_DB))
+    notes = []
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        scope = session_rows_scope(conn, session_id)
+        rows = conn.execute("SELECT id, role, content, display_metadata FROM messages WHERE session_id IN (%s)%s "
+                            "AND display_metadata LIKE '%%reactions%%' ORDER BY id"
+                            % (",".join("?" * len(scope)), ACTIVE_ROWS), tuple(scope)).fetchall()
+        for row_id, role, content, raw in rows:
+            meta = display_meta(raw)
+            changed = False
+            for reaction in reaction_list(meta):
+                if reaction.get("author") != "user" or reaction.get("seen"):
+                    continue
+                reaction["seen"] = True
+                changed = True
+                snippet = message_text(content).strip().replace("\n", " ")
+                if len(snippet) > 120:
+                    snippet = snippet[:120] + "\u2026"
+                whose = "their own" if role == "user" else "your"
+                emoji = reaction.get("emoji") or ""
+                notes.append('[The user reacted %s to %s message: "%s"]' % (emoji, whose, snippet) if snippet
+                             else "[The user reacted %s to %s earlier message]" % (emoji, whose))
+            if changed:
+                conn.execute("UPDATE messages SET display_metadata = ? WHERE id = ?",
+                             (json.dumps(meta, ensure_ascii=False), row_id))
+        conn.execute("COMMIT")
+    except sqlite3.Error:
+        with _suppress():
+            conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+    return "\n".join(notes)
+
+
+def serve_reactions(client, target, lines, leftover, method, local):
+    if key_refused(client, lines):
+        return
+    query = query_of(target)
+    profile = query_profile(client, query)
+    if profile is None:
+        return
+    enabled = reactions_enabled(profile)
+    if method == "GET":
+        session_id = (query.get("session") or [""])[0]
+        if not SESSION_ID.match(session_id):
+            json_error(client, 400, "Bad Request", "bad_request", "Bad session id")
+            return
+        ids = [i for i in ",".join(query.get("ids") or []).split(",") if i]
+        try:
+            found = read_reactions(profile, session_id, ids) if enabled else {}
+        except sqlite3.Error as exc:
+            log("reactions read (%s): %s" % (profile, type(exc).__name__))
+            found = {}
+        send_response(client, 200, "OK", json.dumps({"enabled": enabled, "reactions": found}, ensure_ascii=False),
+                      "application/json")
+        return
+    try:
+        data = json.loads(read_body(client, lines, leftover).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        json_error(client, 400, "Bad Request", "bad_request", "Send JSON")
+        return
+    data = data if isinstance(data, dict) else {}
+    session_id = str(data.get("session") or "")
+    if not SESSION_ID.match(session_id):
+        json_error(client, 400, "Bad Request", "bad_request", "Bad session id")
+        return
+    if not enabled:
+        json_error(client, 409, "Conflict", "reactions_off", "Reactions are off in this profile's settings")
+        return
+    try:
+        if local == REACTIONS_UNSEEN_PATH:
+            body = {"notes": take_unseen_reactions(profile, session_id)}
+        else:
+            row_id, emoji = data.get("row_id"), data.get("emoji")
+            if not isinstance(row_id, int) or isinstance(row_id, bool) or row_id <= 0 or \
+                    (emoji is not None and emoji not in QUICK_REACTIONS):
+                json_error(client, 400, "Bad Request", "bad_request", "Send row_id and one of the six reactions, or null")
+                return
+            reactions = set_reaction(profile, session_id, row_id, emoji)
+            if reactions is None:
+                json_error(client, 404, "Not Found", "not_in_session", "That message is not in this chat")
+                return
+            body = {"row_id": row_id, "reactions": reactions}
+    except sqlite3.Error as exc:
+        log("reactions write (%s): %s" % (profile, type(exc).__name__))
+        json_error(client, 503, "Service Unavailable", "busy", "Hermes is busy writing; try again")
+        return
+    send_response(client, 200, "OK", json.dumps(body, ensure_ascii=False), "application/json")
+
+
+# --- Search -----------------------------------------------------------------------
+# Hermes's /api/sessions title filter is exact-match only, and its full-text
+# search lives on the dashboard behind its own login. The proxy searches one
+# profile's titles and message text read-only and returns each hit as its live
+# compression tip, newest first. Queries are never logged.
+
+SEARCH_PATH = "/phone-api/search"
+SEARCH_LIMIT = 30
+
+
+def like_term(text):
+    return "%" + re.sub(r"([\\%_])", r"\\\1", text) + "%"
+
+
+def lineage_tip(conn, session_id):
+    ids = lineage_ids(conn, lease_root(conn, session_id))
+    for sid in reversed(ids):
+        ended = conn.execute("SELECT end_reason FROM sessions WHERE id = ?", (sid,)).fetchone()
+        if ended and ended[0] != "compression":
+            return sid
+    return ids[-1]
+
+
+def snippet_around(text, needle, width=110):
+    flat = re.sub(r"\s+", " ", text or "").strip()
+    at = flat.lower().find(needle.lower())
+    if at < 0:
+        return flat[:width]
+    start = max(0, at - width // 3)
+    return ("\u2026" if start else "") + flat[start:start + width] + ("\u2026" if start + width < len(flat) else "")
+
+
+def search_sessions(profile, text):
+    term = like_term(text.lower())
+    conn = ro_connect(profile_file(profile, "state.db", STATE_DB))
+    try:
+        hits = {}  # session id -> snippet ("" for a title hit)
+        for (sid,) in conn.execute("SELECT id FROM sessions WHERE lower(COALESCE(title, '')) LIKE ? ESCAPE '\\' "
+                                   "ORDER BY started_at DESC LIMIT 200", (term,)):
+            hits.setdefault(sid, "")
+        for sid, content in conn.execute(
+                "SELECT session_id, content FROM messages WHERE role IN ('user', 'assistant')%s "
+                "AND content LIKE ? ESCAPE '\\' ORDER BY id DESC LIMIT 400" % ACTIVE_ROWS, (term,)):
+            if sid not in hits:
+                hits[sid] = snippet_around(message_text(content), text)
+        tips = {}
+        for sid, snippet in hits.items():
+            tip = lineage_tip(conn, sid)
+            if tip not in tips or (snippet and not tips[tip]):
+                tips[tip] = snippet
+        if not tips:
+            return []
+        marks = ",".join("?" * len(tips))
+        rows = conn.execute(
+            "SELECT id, title, source, started_at, COALESCE(last_activity_at, ended_at, started_at), "
+            "COALESCE(archived, 0), COALESCE(pinned, 0), COALESCE(hidden, 0) FROM sessions WHERE id IN (%s)" % marks,
+            tuple(tips)).fetchall()
+    finally:
+        conn.close()
+    out = []
+    for sid, title, source, started, last, archived, pinned, hidden in rows:
+        if hidden and (title or "").strip() != "Bot Chat":
+            continue
+        out.append({"id": sid, "title": title, "source": source, "started_at": started, "last_active": last,
+                    "archived": bool(archived), "pinned": bool(pinned), "preview": tips[sid],
+                    "match": "message" if tips[sid] else "title"})
+    out.sort(key=lambda r: r["last_active"] or 0, reverse=True)
+    return out[:SEARCH_LIMIT]
+
+
+def serve_search(client, target, lines):
+    if key_refused(client, lines):
+        return
+    query = query_of(target)
+    profile = query_profile(client, query)
+    if profile is None:
+        return
+    text = (query.get("q") or [""])[0].strip()
+    if not 2 <= len(text) <= 100 or re.search(r"[\x00-\x1f]", text):
+        json_error(client, 400, "Bad Request", "bad_request", "Search for 2 to 100 characters")
+        return
+    try:
+        results = search_sessions(profile, text)
+    except sqlite3.Error as exc:
+        log("search (%s): %s" % (profile, type(exc).__name__))
+        results = []
+    send_response(client, 200, "OK", json.dumps({"results": results}, ensure_ascii=False), "application/json")
+
+
 # --- Cron jobs (read-only) ----------------------------------------------------
 # Hermes's API server has no cron routes (only the dashboard does, behind its
 # own login), so the proxy reads each served profile's cron files directly:
@@ -1346,7 +1689,8 @@ def serve_upload(client, target, lines, leftover):
 AUTH_PREFIX = "/phone-api/auth/"
 # Answered here, not by Hermes: no key goes out for them.
 LOCAL_API = (BUSY_PATH, ACTIVE_PATH, DECIDE_PATH, PROFILES_PATH, META_PATH,
-             CRON_PATH, CRON_RUNS_PATH, CRON_OUTPUT_PATH, UPLOAD_PATH, MEDIA_PATH)
+             CRON_PATH, CRON_RUNS_PATH, CRON_OUTPUT_PATH, UPLOAD_PATH, MEDIA_PATH,
+             REACTIONS_PATH, REACTIONS_UNSEEN_PATH, SEARCH_PATH)
 # Polls that must not keep a Face ID session awake.
 BACKGROUND = (BUSY_PATH, ACTIVE_PATH, PROFILES_PATH, META_PATH)
 RUN_APPROVAL = re.compile(r"^/v1/runs/([A-Za-z0-9_.:-]{1,128})/approval$")
@@ -1505,7 +1849,7 @@ def handle_client(client, upstream_addr=UPSTREAM):
         if faceid.enrolled() and not page_request(method, target):
             token = faceid.cookie_token(lines)
             # Background polls do not count as use, so an idle page still locks.
-            background = local in BACKGROUND or (method == "GET" and rest.startswith("/v1/runs/"))
+            background = local in BACKGROUND or (method == "GET" and (rest.startswith("/v1/runs/") or local == REACTIONS_PATH))
             if not faceid.session_valid(token, touch=not background):
                 locked(client)
                 return
@@ -1542,6 +1886,13 @@ def handle_client(client, upstream_addr=UPSTREAM):
             return
         if local == DECIDE_PATH and method == "POST":
             serve_decide(client, lines, leftover)
+            return
+        # Not logged: reaction reads are polled, and a search query is chat text.
+        if (local == REACTIONS_PATH and method in ("GET", "POST")) or (local == REACTIONS_UNSEEN_PATH and method == "POST"):
+            serve_reactions(client, target, lines, leftover, method, local)
+            return
+        if local == SEARCH_PATH and method == "GET":
+            serve_search(client, target, lines)
             return
         if local == UPLOAD_PATH and method == "POST":
             serve_upload(client, target, lines, leftover)
