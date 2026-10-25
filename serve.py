@@ -878,10 +878,47 @@ def key_refused(client, lines):
     return False
 
 
-def all_active():
-    """active_sessions and desktop approvals for every served profile. Each
-    entry and approval names its profile. One unreadable profile is skipped."""
-    active, approvals, failed = {}, [], False
+READ_WINDOW = 30 * 86400
+READ_CAP = 300
+
+
+def read_states(db_path=None, now=None):
+    """Hermes's own read state, the one the desktop's green dots use:
+    {id: unread} for each session with a last_read_at watermark (NULL means
+    Hermes never tracked it) and activity in the last READ_WINDOW. Unread =
+    activity after the watermark, as SessionDB.session_unread; activity is the
+    freshest of last_activity_at, the newest message and started_at. The
+    watermark is stamped across a compression lineage, so every id of the
+    lineage gets the lineage's answer. The Hermes API leaves this field out of
+    /api/sessions, so the proxy reads it here."""
+    now = time.time() if now is None else now
+    conn = ro_connect(db_path or STATE_DB)
+    try:
+        rows = conn.execute(
+            "SELECT s.id, s.last_read_at, MAX(COALESCE(s.last_activity_at, 0), "
+            "COALESCE((SELECT MAX(m.timestamp) FROM messages m WHERE m.session_id = s.id), 0), "
+            "COALESCE(s.started_at, 0)) AS act FROM sessions s "
+            "WHERE s.last_read_at IS NOT NULL ORDER BY act DESC LIMIT ?", (READ_CAP,)).fetchall()
+        own = {sid: float(act or 0) > float(read or 0) for sid, read, act in rows
+               if float(act or 0) >= now - READ_WINDOW}
+        out = {}
+        for sid in own:
+            if sid in out:
+                continue
+            ids = lineage_ids(conn, lease_root(conn, sid))
+            unread = any(own.get(i) for i in ids)
+            for i in ids:
+                out[i] = unread
+    finally:
+        conn.close()
+    return out
+
+
+def all_active(with_reads=True):
+    """active_sessions, desktop approvals and Hermes read state for every
+    served profile. Each entry and approval names its profile. One unreadable
+    profile is skipped."""
+    active, approvals, reads, failed = {}, [], {}, False
     for name in served_profiles():
         items = desktop_approvals(profile_file(name, "phone-approvals", APPROVALS_DIR))
         for item in items:
@@ -896,8 +933,16 @@ def all_active():
         for sid, entry in part.items():
             active[sid] = dict(entry, profile=name)
         approvals.extend(items)
+        if not with_reads:
+            continue
+        try:
+            # An older Hermes has no last_read_at column: no read state, the page keeps its own.
+            for sid, unread in read_states(profile_file(name, "state.db", STATE_DB)).items():
+                reads[sid] = {"unread": unread, "profile": name}
+        except sqlite3.Error as exc:
+            log("read state (%s): %s" % (name, type(exc).__name__))
     approvals.sort(key=lambda item: item.get("created") or 0)
-    return (None if failed and not active else active), approvals
+    return (None if failed and not active else active), approvals, reads
 
 
 def serve_active(client, lines, target=""):
@@ -906,8 +951,9 @@ def serve_active(client, lines, target=""):
     # ?unread=N: the page's own unread count, the floor for the app badge.
     unread = (query_of(target).get("unread") or [""])[0] if target else ""
     note_page(int(unread) if unread.isdigit() else None)
-    active, approvals = all_active()
-    send_response(client, 200, "OK", json.dumps({"active": active, "approvals": approvals}), "application/json")
+    active, approvals, reads = all_active()
+    send_response(client, 200, "OK", json.dumps({"active": active, "approvals": approvals, "read": reads}),
+                  "application/json")
 
 
 def query_of(target):
@@ -2355,7 +2401,7 @@ def watch_runs():
                 if config.get("approvals_dir"):
                     approvals = desktop_approvals(config["approvals_dir"])
                 else:
-                    approvals = all_active()[1]
+                    approvals = all_active(with_reads=False)[1]
                 check_desktop(config, approvals, desktop_alerted)
                 if config.get("db"):
                     runs = read_runs(config["db"])

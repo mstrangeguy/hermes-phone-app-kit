@@ -90,5 +90,46 @@ check("completed run does not mark approval", act["other"]["state"] == "working"
 check("active has no holder string", all(set(v) == {"state", "since", "platform"} for v in act.values()))
 check("missing run store is fine", serve.active_sessions(db, os.path.join(work, "none.db"))["other"]["state"] == "working")
 
+# --- Hermes read state (last_read_at watermark), shared with the desktop ---
+# An older Hermes without last_read_at: an sqlite error, which all_active logs and skips.
+try:
+    serve.read_states(db)
+    check("no last_read_at column is an sqlite error", False)
+except sqlite3.Error:
+    check("no last_read_at column is an sqlite error", True)
+
+rdb = os.path.join(work, "read.db")
+if os.path.exists(rdb):
+    os.remove(rdb)
+conn = sqlite3.connect(rdb)
+conn.executescript("""
+CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT, end_reason TEXT,
+  started_at REAL, last_activity_at REAL, last_read_at REAL);
+CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, timestamp REAL);
+""")
+day = 86400
+conn.executemany("INSERT INTO sessions VALUES (?,?,?,?,?,?)", [
+    ("fresh", None, None, now - 600, now - 60, now - 300),        # activity after read -> unread
+    ("seen", None, None, now - 600, now - 400, now - 300),        # read after activity -> read
+    ("msgnewer", None, None, now - 600, now - 400, now - 300),    # heartbeat lags, a message is newer -> unread
+    ("never", None, None, now - 600, now - 60, None),             # NULL = never tracked -> absent
+    ("zero", None, None, now - 600, None, 0.0),                   # 0 = marked unread -> unread
+    ("old", None, None, now - 90 * day, now - 89 * day, now - 95 * day),  # outside the window -> absent
+    ("croot", None, "compression", now - 900, now - 800, now - 100),
+    ("ctip", "croot", None, now - 800, now - 20, now - 100)])     # lineage: tip newer than watermark
+conn.executemany("INSERT INTO messages (session_id, timestamp) VALUES (?,?)", [
+    ("msgnewer", now - 10), ("seen", now - 450)])
+conn.commit()
+conn.close()
+rs = serve.read_states(rdb, now)
+check("activity after the watermark is unread", rs.get("fresh") is True)
+check("watermark after activity is read", rs.get("seen") is False)
+check("a newer message beats a lagging heartbeat", rs.get("msgnewer") is True)
+check("never-tracked session is left to the page", "never" not in rs)
+check("0 watermark (marked unread) is unread", rs.get("zero") is True)
+check("sessions outside the window are left out", "old" not in rs)
+check("compression lineage shares one answer", rs.get("croot") is True and rs.get("ctip") is True)
+check("read state is plain booleans", all(isinstance(v, bool) for v in rs.values()))
+
 print("%d passed, %d failed" % (results.count(True), results.count(False)))
 sys.exit(0 if all(results) else 1)
