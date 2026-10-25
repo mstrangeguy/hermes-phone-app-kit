@@ -35,11 +35,12 @@ Run Python for this app with `scripts/py`, never a hardcoded interpreter path. I
 Run every suite with Hermes's venv Python, each with its own empty scratch folder:
 
 ```bash
-for t in plugin faceid approvals alerts busy profiles cron look; do
+for t in plugin faceid approvals alerts busy profiles cron look pictures bots; do
   scripts/py -I tests/${t}_test.py "$PWD" "$(mktemp -d)" | tail -1
 done
 ```
 
+- `bots_test.py` runs `page/lists.js` (main-list, Bots and Cron rules) in node: from `PATH`, `$NODE`, or the copy Hermes keeps beside its checkout (`<Hermes home>/node/bin/node`). Keep list rules in `lists.js`, not `app.js`, so they stay testable.
 - Re-run `plugin_test.py` after every `hermes update`. It drives Hermes's real approval code; set `HERMES_AGENT_DIR` to test another checkout.
 - Any test importing `serve` or `faceid` must point `serve.CONFIG_PATH`, `faceid.CONFIG_PATH` and `faceid.SETUP_PATH` into its scratch folder. Otherwise a live enrolled passkey locks the API-key path and the test fails for the wrong reason. Keep the `FAIL ISOLATION` guard in new tests.
 - Never test alerts by starting a real run. `alerts_test.py` uses fake Home Assistant and Telegram servers. To check the real channel once: `serve.py --notify "test"`.

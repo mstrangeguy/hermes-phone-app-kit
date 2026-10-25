@@ -137,7 +137,7 @@ header.bar {
 /* Status dot, after the desktop sidebar: colour tells the states apart;
    only "needs approval" pulses, since it is the one that needs you. */
 .sdot { flex: none; width: 7px; height: 7px; border-radius: 50%; align-self: center; margin-right: -1px; }
-.sdot:not(.dot-approval):not(.dot-working):not(.dot-unread):not(.dot-bad):not(.dot-paused) { display: none; }
+.sdot:not(.dot-approval):not(.dot-working):not(.dot-unread):not(.dot-bad):not(.dot-paused):not(.dot-on):not(.dot-running):not(.dot-held):not(.dot-off) { display: none; }
 .sdot.dot-working { background: var(--primary); }
 .sdot.dot-approval { background: #f59e0b; animation: sdot-pulse 1.6s ease-in-out infinite; }
 .sdot.dot-unread { background: #3fb950; }
@@ -635,6 +635,18 @@ button.bucket.group::after { order: 3; }
 .cron-title { color: var(--muted-fg); font-weight: 500; }
 .sdot.dot-bad { background: var(--danger); }
 .sdot.dot-paused { background: var(--muted-fg); }
+/* Job state dots, as the desktop Cron section: accent scheduled (pulsing
+   while running), amber paused, grey finished or disabled, red on error. */
+.sdot.dot-on, .sdot.dot-running { background: var(--primary); }
+.sdot.dot-running { animation: sdot-pulse 1.6s ease-in-out infinite; }
+.sdot.dot-held { background: #f59e0b; }
+.sdot.dot-off { background: var(--muted-fg); opacity: 0.6; }
+@media (prefers-reduced-motion: reduce) { .sdot.dot-running { animation: none; } }
+/* Bots: one row per profile opening its Bot Chat, then messaging platforms. */
+#bots-screen { background: var(--sidebar); }
+#bots-screen .list { padding-top: 6px; }
+.session.bot.none { opacity: 0.55; }
+.session.bot.none .preview { font-style: italic; }
 #job-screen { background: var(--bg); }
 #job-screen header.bar { background: var(--bg); border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent); }
 .job-body { padding-bottom: 24px; }
@@ -657,8 +669,7 @@ button.bucket.group::after { order: 3; }
   border: 0; background: none; color: var(--fg); text-align: left; font-size: 14px;
 }
 .run-head:active { background: var(--muted); }
-.run-when { flex: none; font-weight: 500; }
-.run-meta { flex: 1; min-width: 0; color: var(--muted-fg); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.run-when { flex: 1; min-width: 0; font-weight: 500; font-variant-numeric: tabular-nums; }
 .run-head .chev { flex: none; color: var(--muted-fg); transition: transform 0.15s; }
 .run-head[aria-expanded="true"] .chev { transform: rotate(90deg); }
 .run-body { padding: 2px 2px 12px; }

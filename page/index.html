@@ -71,7 +71,7 @@
 
   <section class="screen" id="list-screen" hidden>
     <header class="bar">
-      <button class="icon nav-btn" type="button" data-drawer aria-label="Menu: sessions, cron, view" aria-expanded="false" aria-controls="drawer">
+      <button class="icon nav-btn" type="button" data-drawer aria-label="Menu: sessions, bots, cron, view" aria-expanded="false" aria-controls="drawer">
         <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M3 5h12M3 9h12M3 13h12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
       </button>
       <button class="wordmark wordmark-btn" type="button" data-drawer>Hermes</button>
@@ -90,7 +90,7 @@
 
   <section class="screen" id="cron-screen" hidden>
     <header class="bar">
-      <button class="icon nav-btn" type="button" data-drawer aria-label="Menu: sessions, cron, view" aria-expanded="false" aria-controls="drawer">
+      <button class="icon nav-btn" type="button" data-drawer aria-label="Menu: sessions, bots, cron, view" aria-expanded="false" aria-controls="drawer">
         <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M3 5h12M3 9h12M3 13h12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
       </button>
       <button class="wordmark wordmark-btn" type="button" data-drawer>Hermes</button>
@@ -100,6 +100,20 @@
       </button>
     </header>
     <div class="list" id="cron-list"></div>
+  </section>
+
+  <section class="screen" id="bots-screen" hidden>
+    <header class="bar">
+      <button class="icon nav-btn" type="button" data-drawer aria-label="Menu: sessions, bots, cron, view" aria-expanded="false" aria-controls="drawer">
+        <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M3 5h12M3 9h12M3 13h12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      </button>
+      <button class="wordmark wordmark-btn" type="button" data-drawer>Hermes</button>
+      <div class="title grow">Bots</div>
+      <button class="icon" type="button" id="bots-refresh" aria-label="Refresh">
+        <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M14.5 9a5.5 5.5 0 1 1-1.6-3.9M14.5 3v3.2h-3.2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </header>
+    <div class="list" id="bots-list"></div>
   </section>
 
   <section class="screen" id="job-screen" hidden>
@@ -120,6 +134,7 @@
       </div>
       <div class="drawer-modes">
         <button class="drawer-mode" type="button" data-mode="sessions">Sessions</button>
+        <button class="drawer-mode" type="button" data-mode="bots">Bots</button>
         <button class="drawer-mode" type="button" data-mode="cron">Cron jobs</button>
       </div>
       <div class="sheet-body" id="sheet-body"></div>
@@ -187,6 +202,7 @@
 </div>
 <script src="vendor/purify.min.js"></script>
 <script src="vendor/marked.umd.js"></script>
+<script src="lists.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

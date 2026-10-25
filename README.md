@@ -40,7 +40,17 @@ The installer asks before each change. In order, it:
 1. With Tailscale connected, open the URL the installer printed in Safari.
 2. Share → Add to Home Screen. Open the app from the new icon.
 3. Enter the setup code, then tap Set up Face ID. From then on the app unlocks with Face ID, and allowing a command needs Face ID again.
-4. The menu button (or the word Hermes) opens a side panel: Sessions or Cron jobs, and the list's view options. Cron jobs are read-only: each job's schedule, state and past runs with their saved output.
+4. The menu button (or the word Hermes) opens a side panel with three screens, in the Hermes desktop sidebar's order, plus that screen's view options:
+
+| Screen | What it shows |
+|---|---|
+| Sessions | Your own chats: ones started on the phone, in the desktop app or in a terminal. Pinned chats stay at the top whatever their source. Cron runs, Bot Chats and messaging-platform chats are left out, as in the desktop sidebar. |
+| Bots | One row per profile the phone serves, opening that profile's Bot Chat (a dot shows when it is replying). A profile without one says "No Bot Chat yet"; Bot Chats are made in the desktop app. Below them, chats from messaging platforms (Telegram, Slack, ...) under one heading per platform, if there are any. |
+| Cron jobs | One row per job with a state dot (accent scheduled, amber paused, grey finished, red failed). A job opens its schedule and its runs, newest first, labeled by time. A run opens its chat, or its saved output when there is no chat or the run failed. Read-only. |
+
+View options → Show → **Cron runs and bot chats** (off by default, kept on the phone) puts cron runs and messaging chats back in the Sessions list, as before. The Source chips still filter on top of it.
+
+Not on the phone (desktop only): Bot Mode group chats and rooms, bot avatars, creating or editing Bot Chats and cron jobs.
 
 If the code expired: `cd ~/.hermes/phone-chat && scripts/py -I serve.py --setup-code`
 

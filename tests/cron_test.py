@@ -4,7 +4,7 @@ Usage: python3 -I tests/cron_test.py <repo-dir> <empty-scratch-dir>
 
 Covers: job list per profile and for all, the fields sent, runs joined from the
 run log, output files and run sessions, output reads (and refusals for any
-other path), the key / Face ID gate, and that nothing is written.
+other path), archived run sessions still listed, the key / Face ID gate, and that nothing is written.
 """
 import http.client
 import json
@@ -112,10 +112,12 @@ os.makedirs(big)
 with open(os.path.join(big, fname(t2)), "w") as handle:
     handle.write("z" * (serve.OUTPUT_MAX + 10))
 st = sqlite3.connect(os.path.join(ha, "state.db"))
-st.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT)")
-st.executemany("INSERT INTO sessions VALUES (?, 'cron')", [(sid("bbb222", t1),), (sid("bbb222", t2),),
+st.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, archived INTEGER NOT NULL DEFAULT 0)")
+st.executemany("INSERT INTO sessions (id, source) VALUES (?, 'cron')", [(sid("bbb222", t1),), (sid("bbb222", t2),),
                                                            (sid("bbb2220", t2),)])
-st.execute("INSERT INTO sessions VALUES (?, 'desktop')", (sid("bbb222", t0),))
+st.execute("INSERT INTO sessions (id, source) VALUES (?, 'desktop')", (sid("bbb222", t0),))
+# Older runs get archived (the reconcile job archives its own); they must still list and open.
+st.execute("UPDATE sessions SET archived = 1 WHERE id = ?", (sid("bbb222", t1),))
 st.commit()
 st.close()
 
@@ -188,6 +190,7 @@ check("runs listed newest first", status == 200 and len(runs) == 3 and runs[0]["
 check("failed run keeps error and delivery", runs and runs[0]["error"] == "boom" and runs[0]["delivery"] == "failed")
 check("run joins its output", runs and runs[0]["output"] == fname(t2 + 20) and runs[1]["output"] == fname(t1 + 15))
 check("run joins its session", runs and runs[0]["session"] == sid("bbb222", t2) and runs[1]["session"] == sid("bbb222", t1))
+check("archived run session still listed (opens from Cron jobs)", len(runs) > 1 and runs[1]["session"] == sid("bbb222", t1))
 check("other job's session not taken", all(r["session"] != sid("bbb2220", t2) for r in runs))
 check("output before the run log still listed", runs and runs[2]["output"] == fname(t0) and runs[2]["status"] is None)
 check("non-cron session ignored", runs and runs[2]["session"] is None)

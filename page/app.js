@@ -532,14 +532,16 @@ function setKey(value) {
   } catch (e) {}
 }
 
-const SCREENS = ["key-screen", "lock-screen", "setup-screen", "list-screen", "cron-screen", "job-screen", "chat-screen"];
+const SCREENS = ["key-screen", "lock-screen", "setup-screen", "list-screen", "bots-screen", "cron-screen", "job-screen", "chat-screen"];
+// The drawer's three screens, in the desktop sidebar's order.
+const LIST_SCREENS = ["list-screen", "bots-screen", "cron-screen"];
 // The status bar takes the colour of the header under it, so it reads as one band.
-const BAR_COLOR = { "list-screen": "#010409", "cron-screen": "#010409" };
+const BAR_COLOR = { "list-screen": "#010409", "bots-screen": "#010409", "cron-screen": "#010409" };
 function show(id) {
   for (const screen of SCREENS) {
     $(screen).hidden = screen !== id;
   }
-  if (id !== "list-screen" && id !== "cron-screen") toggleSheet(false);
+  if (!LIST_SCREENS.includes(id)) toggleSheet(false);
   const color = BAR_COLOR[id] || "#0d1117";
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta) meta.setAttribute("content", color);
@@ -808,10 +810,17 @@ const GROUPS = [["date", "Date"], ["project", "Project"], ["status", "Status"], 
 const SORTS = [["updated", "Updated"], ["created", "Created"], ["status", "Status"], ["tokens", "Tokens"], ["cost", "Cost"]];
 const STATUSES = [["approval", "Needs approval"], ["working", "Working"], ["unread", "Unread"], ["idle", "Idle"]];
 const STATUS_RANK = { approval: 0, working: 1, unread: 2, idle: 3 };
-const VIEW_DEFAULT = { profile: "default", group: "date", sort: "updated", status: [], sources: [], archived: false, collapsed: {} };
+// allSources: "Cron runs and bot chats" in the main list (the old list). Off
+// by default: like the desktop, the main list is your own chats, and cron
+// runs, Bot Chats and messaging chats have their own screens.
+const VIEW_DEFAULT = { profile: "default", group: "date", sort: "updated", status: [], sources: [], archived: false, allSources: false, collapsed: {} };
 const VIEW = loadView();
 const PROFILES = { list: ["default"] };
 const LIST = { seq: 0, note: "" };
+// Rows per page, and how many pages one load may fetch per profile to fill
+// the screen when most rows are filtered out (cron runs, messaging chats).
+const PAGE_ROWS = 50;
+const FILL_PAGES = 5;
 
 function loadView() {
   let saved = {};
@@ -822,6 +831,7 @@ function loadView() {
   for (const name of ["status", "sources"]) if (!Array.isArray(view[name])) view[name] = [];
   if (!view.collapsed || typeof view.collapsed !== "object") view.collapsed = {};
   view.archived = Boolean(view.archived);
+  view.allSources = Boolean(view.allSources);
   if (typeof view.profile !== "string" || !view.profile) view.profile = "default";
   return view;
 }
@@ -832,7 +842,7 @@ function saveView() {
 
 function viewChanged() {
   return VIEW.group !== "date" || VIEW.sort !== "updated" || VIEW.status.length > 0 ||
-    VIEW.sources.length > 0 || VIEW.archived;
+    VIEW.sources.length > 0 || VIEW.archived || VIEW.allSources;
 }
 
 function profileLabel(name) {
@@ -868,36 +878,47 @@ async function loadSessions(reset) {
   const profiles = viewProfiles();
   const seq = ++LIST.seq;
   const pages = reset ? {} : state.pages;
-  const results = await Promise.all(profiles.map(async (profile) => {
-    const page = pages[profile] || { offset: 0, more: true };
-    if (!page.more) return { profile, rows: null };
-    const res = await api(inProfile(profile, "/api/sessions?limit=50&offset=" + page.offset));
-    if (!res.ok) {
-      // One profile down still shows the others.
-      if (profiles.length === 1) throw new Error(await errorMessage(res));
-      return { profile, rows: null, failed: true };
-    }
-    const data = await res.json();
-    return { profile, rows: Array.isArray(data.data) ? data.data : [], more: Boolean(data.has_more) };
-  }));
-  if (seq !== LIST.seq) return;
   const merged = new Map((reset ? [] : state.sessions).map((s) => [sessionKey(s), s]));
-  const failed = [];
-  for (const r of results) {
-    if (r.failed) failed.push(profileLabel(r.profile));
-    if (!r.rows) continue;
-    const page = pages[r.profile] || { offset: 0 };
-    page.offset += r.rows.length;
-    page.more = r.more;
-    pages[r.profile] = page;
-    for (const row of r.rows) {
-      row._profile = r.profile;
-      merged.set(sessionKey(row), row);
+  const failed = new Set();
+  const own = () => PhoneLists.mainRows([...merged.values()], VIEW.allSources).length;
+  // One more page per profile that has one, until a page's worth of rows
+  // would show (see PhoneLists.fillPages).
+  const target = (reset ? 0 : own()) + PAGE_ROWS;
+  const round = async () => {
+    const results = await Promise.all(profiles.map(async (profile) => {
+      const page = pages[profile] || { offset: 0, more: true };
+      if (!page.more || failed.has(profile)) return { profile, rows: null };
+      const res = await api(inProfile(profile, "/api/sessions?limit=" + PAGE_ROWS + "&offset=" + page.offset));
+      if (!res.ok) {
+        // One profile down still shows the others.
+        if (profiles.length === 1) throw new Error(await errorMessage(res));
+        return { profile, rows: null, failed: true };
+      }
+      const data = await res.json();
+      const rows = Array.isArray(data.data) ? data.data : [];
+      return { profile, rows, step: PhoneLists.pageStep(rows, PAGE_ROWS, data.has_more) };
+    }));
+    if (seq !== LIST.seq) return { stale: true };
+    for (const r of results) {
+      if (r.failed) failed.add(r.profile);
+      if (!r.rows) continue;
+      const page = pages[r.profile] || { offset: 0 };
+      page.offset += r.step.advance;
+      page.more = r.step.more;
+      pages[r.profile] = page;
+      for (const row of r.rows) {
+        row._profile = r.profile;
+        merged.set(sessionKey(row), row);
+      }
     }
-  }
+    const more = profiles.some((p) => !failed.has(p) && (!pages[p] || pages[p].more));
+    return { visible: own(), more };
+  };
+  await PhoneLists.fillPages(round, target, FILL_PAGES);
+  if (seq !== LIST.seq) return;
   state.pages = pages;
   state.sessions = [...merged.values()];
-  LIST.note = failed.length ? "Could not load " + failed.join(", ") + "." : "";
+  LIST.note = failed.size ? "Could not load " + [...failed].map(profileLabel).join(", ") + "." : "";
   await loadMeta(profiles).catch((e) => { if (e.status === 401) throw e; });
   if (seq !== LIST.seq) return;
   renderSessions();
@@ -1007,6 +1028,7 @@ async function checkActive() {
       if (ended) await loadSessions(true).catch(() => renderSessions());
       else paintDots();
     }
+    if (!$("bots-screen").hidden) paintBotDots();
   } catch (e) {
     // Quiet: the list still works without dots.
   } finally {
@@ -1131,10 +1153,16 @@ function sortSessions(list) {
   return list.slice().sort((a, b) => (sortValue(b) - sortValue(a)) || (recent(b) - recent(a)));
 }
 
-function shownSessions() {
+// Loaded rows the main list may show: your own chats, unless the View
+// setting brings back cron runs, Bot Chats and messaging chats.
+function ownSessions() {
   const archived = VIEW.archived ? state.archived : [];
   const seen = new Set(state.sessions.map(sessionKey));
-  let list = state.sessions.concat(archived.filter((s) => !seen.has(sessionKey(s))));
+  return PhoneLists.mainRows(state.sessions.concat(archived.filter((s) => !seen.has(sessionKey(s)))), VIEW.allSources);
+}
+
+function shownSessions() {
+  let list = ownSessions();
   if (VIEW.status.length) list = list.filter((s) => VIEW.status.includes(sessionStatus(s)));
   if (VIEW.sources.length) list = list.filter((s) => VIEW.sources.includes(sourceGroup(s.source)));
   return list;
@@ -1242,7 +1270,7 @@ function renderSessions() {
   if (!list.length) {
     const empty = document.createElement("div");
     empty.className = "empty";
-    empty.textContent = state.sessions.length || state.archived.length ? "Nothing matches these filters." : "No sessions yet.";
+    empty.textContent = ownSessions().length ? "Nothing matches these filters." : "No sessions yet.";
     root.appendChild(empty);
   }
   const groups = groupSessions(list);
@@ -1342,7 +1370,10 @@ function renderSheet() {
     renderSheet();
     renderSessions();
   })));
-  const sources = [...new Set(state.sessions.concat(state.archived).map((s) => sourceGroup(s.source)).concat(VIEW.sources))]
+  // Chips for the sources the list can show: with the setting off, cron and
+  // messaging rows are on their own screens, so they offer no chip here.
+  const sources = [...new Set(PhoneLists.mainRows(state.sessions.concat(state.archived), VIEW.allSources)
+    .map((s) => sourceGroup(s.source)).concat(VIEW.sources))]
     .sort().map((s) => [s, s]);
   if (sources.length > 1 || VIEW.sources.length) {
     body.append(sheetSection("Source", chipRow(sources, (id) => VIEW.sources.includes(id), (id) => {
@@ -1352,23 +1383,40 @@ function renderSheet() {
       renderSessions();
     })));
   }
-  body.append(sheetSection("Show", chipRow([["archived", "Archived"]], () => VIEW.archived, () => {
-    VIEW.archived = !VIEW.archived;
-    saveView();
-    renderSheet();
-    refreshMeta();
-  })));
+  const showSec = sheetSection("Show", chipRow([["archived", "Archived"], ["all", "Cron runs and bot chats"]],
+    (id) => id === "all" ? VIEW.allSources : VIEW.archived, (id) => {
+      if (id === "all") {
+        VIEW.allSources = !VIEW.allSources;
+        saveView();
+        renderSheet();
+        renderSessions();
+        // Fewer rows may show now; fetch more pages to fill the screen.
+        loadSessions(true).catch(listError);
+        return;
+      }
+      VIEW.archived = !VIEW.archived;
+      saveView();
+      renderSheet();
+      refreshMeta();
+    }));
+  const hint = document.createElement("p");
+  hint.className = "sheet-note";
+  hint.textContent = "Cron runs and bot chats: also list cron runs, Bot Chats and messaging chats here. Off, they are under Bots and Cron jobs.";
+  showSec.append(hint);
+  body.append(showSec);
   const reset = document.createElement("button");
   reset.type = "button";
   reset.className = "textbtn sheet-reset";
   reset.textContent = "Reset view";
   reset.disabled = !viewChanged() && !Object.keys(VIEW.collapsed).length;
   reset.addEventListener("click", () => {
+    const refill = VIEW.allSources;
     Object.assign(VIEW, VIEW_DEFAULT, { profile: VIEW.profile, status: [], sources: [], collapsed: {} });
     saveView();
     renderSheet();
     state.archived = [];
     renderSessions();
+    if (refill) loadSessions(true).catch(listError);
   });
   body.append(reset);
 }
@@ -1395,6 +1443,7 @@ function renderDrawer() {
     button.setAttribute("aria-current", on ? "page" : "false");
   }
   if (DRAWER.mode === "cron") renderCronSheet();
+  else if (DRAWER.mode === "bots") renderBotsSheet();
   else renderSheet();
 }
 
@@ -1403,10 +1452,143 @@ function pickMode(mode) {
   if (mode === "cron") {
     history.replaceState({ cron: true }, "", "#cron");
     showCron();
+  } else if (mode === "bots") {
+    history.replaceState({ bots: true }, "", "#bots");
+    showBots();
   } else {
     history.replaceState({}, "", location.pathname);
     showList();
   }
+}
+
+// --- Bots -----------------------------------------------------------------------
+// After the desktop's Bots section: one row per profile, opening that
+// profile's Bot Chat (the session titled exactly "Bot Chat", found with
+// Hermes's exact-title lookup), then messaging-platform chats grouped by
+// platform. Bot Chats are made on the desktop, never from here.
+const BOTS = { rows: [], groups: [], seq: 0, note: "", loaded: false };
+
+async function loadBots() {
+  const seq = ++BOTS.seq;
+  const profiles = PROFILES.list.slice();
+  try {
+    const results = await Promise.all(profiles.map(async (profile) => {
+      const entry = { profile, chat: null, failed: false, messaging: [] };
+      const lookup = "/api/sessions?title=" + encodeURIComponent(PhoneLists.BOT_CHAT_TITLE) + "&include_hidden=1&limit=50";
+      const [bot, recent] = await Promise.all([
+        api(inProfile(profile, lookup)),
+        api(inProfile(profile, "/api/sessions?limit=200"))
+      ]);
+      if (bot.ok) {
+        const data = await bot.json();
+        entry.chat = PhoneLists.pickBotChat(data.data);
+      } else {
+        entry.failed = true;
+      }
+      if (recent.ok) {
+        const data = await recent.json();
+        entry.messaging = (Array.isArray(data.data) ? data.data : []).filter((r) => PhoneLists.isMessaging(r.source));
+        for (const row of entry.messaging) row._profile = profile;
+      }
+      return entry;
+    }));
+    if (seq !== BOTS.seq) return;
+    BOTS.rows = results;
+    BOTS.groups = PhoneLists.messagingGroups(results.flatMap((r) => r.messaging));
+    const failed = results.filter((r) => r.failed).map((r) => profileLabel(r.profile));
+    BOTS.note = failed.length ? "Could not load " + failed.join(", ") + "." : "";
+  } catch (e) {
+    if (e.status === 401) return showKey(e.message);
+    if (seq !== BOTS.seq) return;
+    BOTS.note = e.message || "Could not load bots";
+  }
+  BOTS.loaded = true;
+  renderBots();
+}
+
+function botRow(entry) {
+  const chat = entry.chat;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "session bot" + (chat ? "" : " none");
+  if (chat) button.dataset.id = chat.id;
+  const row = document.createElement("div");
+  row.className = "row";
+  const dot = document.createElement("span");
+  dot.className = "sdot";
+  dot.setAttribute("role", "status");
+  const name = document.createElement("div");
+  name.className = "name";
+  name.textContent = profileLabel(entry.profile);
+  const time = document.createElement("div");
+  time.className = "when";
+  time.dataset.idle = chat ? when(chat.last_active || chat.started_at) : "";
+  row.append(dot, name, time);
+  const preview = document.createElement("div");
+  preview.className = "preview";
+  if (chat) {
+    preview.textContent = (chat.preview || "").replace(/\s+/g, " ").trim() || "Bot Chat";
+    button.append(row, preview);
+    paintDot(button, chat.id);
+    button.addEventListener("click", () => openSession(chat.id, chat.title || PhoneLists.BOT_CHAT_TITLE, true, entry.profile));
+  } else {
+    time.textContent = "";
+    preview.textContent = entry.failed ? "Could not check" : "No Bot Chat yet";
+    button.disabled = true;
+    button.setAttribute("aria-disabled", "true");
+    button.append(row, preview);
+  }
+  return button;
+}
+
+function renderBots() {
+  const root = $("bots-list");
+  const scroll = root.scrollTop;
+  root.textContent = "";
+  if (BOTS.note) {
+    const note = document.createElement("div");
+    note.className = "empty note-line";
+    note.textContent = BOTS.note;
+    root.append(note);
+  }
+  if (!BOTS.loaded) {
+    const wait = document.createElement("div");
+    wait.className = "empty";
+    wait.textContent = "Loading…";
+    root.append(wait);
+  }
+  for (const entry of BOTS.rows) root.append(botRow(entry));
+  // Messaging platforms, one heading each, only when such chats exist.
+  for (const group of BOTS.groups) {
+    const head = document.createElement("div");
+    head.className = "bucket";
+    head.textContent = group.label;
+    root.append(head);
+    for (const session of group.sessions) root.append(sessionButton(session));
+  }
+  root.scrollTop = scroll;
+}
+
+function paintBotDots() {
+  for (const button of document.querySelectorAll("#bots-list .session[data-id]")) {
+    paintDot(button, button.dataset.id);
+  }
+}
+
+function renderBotsSheet() {
+  const body = $("sheet-body");
+  body.textContent = "";
+  const note = document.createElement("p");
+  note.className = "sheet-note";
+  note.textContent = "One Bot Chat per profile. Bot Chats are made in the desktop app; group chats and rooms stay there too.";
+  body.append(note);
+}
+
+function showBots() {
+  DRAWER.mode = "bots";
+  show("bots-screen");
+  renderBots();
+  loadBots();
 }
 
 // --- Cron jobs ------------------------------------------------------------------
@@ -1466,13 +1648,6 @@ function plainSchedule(text) {
   return text;
 }
 
-function jobHealth(job) {
-  const status = String(job.last_status || "").toLowerCase();
-  if (job.last_error || /error|fail/.test(status)) return "bad";
-  if (job.state === "paused" || job.enabled === false) return "paused";
-  return "";
-}
-
 function jobStateLabel(job) {
   if (job.state === "completed") return "Finished";
   if (job.state === "paused" || job.enabled === false) return "Paused";
@@ -1516,8 +1691,7 @@ function cronRow(job) {
   const row = document.createElement("div");
   row.className = "row";
   const dot = document.createElement("span");
-  const health = jobHealth(job);
-  dot.className = "sdot" + (health ? " dot-" + health : "");
+  dot.className = "sdot dot-" + PhoneLists.jobDot(job);
   const name = document.createElement("span");
   name.className = "name";
   name.textContent = job.name || job.id;
@@ -1718,24 +1892,25 @@ function runRow(job, run, index) {
   const [label, tone] = runStatus(run);
   const dot = document.createElement("span");
   dot.className = "sdot" + (tone ? " dot-" + tone : "");
+  // Labeled by time only, as on the desktop: every run has the job's name.
+  // The dot carries the outcome; the label also says so for screen readers.
   const when = document.createElement("span");
   when.className = "run-when";
   when.textContent = clockTime(stampOf(run.at || run.started || run.finished));
-  const meta = document.createElement("span");
-  meta.className = "run-meta";
-  const start = stampOf(run.started);
-  const end = stampOf(run.finished);
-  const parts = [label];
-  if (start && end && end >= start) parts.push(fmtDur((end - start) / 1000));
-  if (run.delivery) parts.push(statusWord(run.delivery));
-  meta.textContent = parts.filter(Boolean).join(" · ");
+  if (label) head.setAttribute("aria-label", when.textContent + ", " + label);
   const chev = document.createElement("span");
   chev.className = "chev";
   chev.textContent = "›";
-  head.append(dot, when, meta, chev);
+  head.append(dot, when, chev);
   wrap.append(head);
   const key = String(index);
   const open = CRON.open[key];
+  // A run with its chat opens the chat. A failed run, or one whose session
+  // is gone, expands to its error and saved output instead.
+  if (run.session && !run.error) {
+    head.addEventListener("click", () => openSession(run.session, (job.name || "Cron") + " · " + clockTime(stampOf(run.at)), true, job.profile || "default"));
+    return wrap;
+  }
   head.setAttribute("aria-expanded", open ? "true" : "false");
   head.addEventListener("click", () => {
     if (CRON.open[key]) delete CRON.open[key];
@@ -4109,6 +4284,9 @@ $("back").addEventListener("click", () => {
   else if (DRAWER.mode === "cron") {
     history.pushState({ cron: true }, "", "#cron");
     showCron();
+  } else if (DRAWER.mode === "bots") {
+    history.pushState({ bots: true }, "", "#bots");
+    showBots();
   } else {
     history.pushState({}, "", location.pathname);
     showList();
@@ -4118,6 +4296,7 @@ $("back").addEventListener("click", () => {
 window.addEventListener("popstate", () => {
   const cron = cronHashTarget();
   if (cron) return void openCronTarget(cron);
+  if (location.hash === "#bots") return void showBots();
   const target = hashTarget();
   if (target) openSession(target.id, "Hermes", false, target.profile);
   else showList();
@@ -4143,6 +4322,7 @@ $("drawer").addEventListener("touchend", (event) => {
 }, { passive: true });
 $("profile-chip").addEventListener("click", () => toggleSheet(true));
 $("cron-refresh").addEventListener("click", () => loadCron());
+$("bots-refresh").addEventListener("click", () => loadBots());
 $("job-back").addEventListener("click", () => {
   if (history.state && history.state.job) history.back();
   else {
@@ -4313,6 +4493,7 @@ async function boot() {
   const cron = cronHashTarget();
   if (target) openSession(target.id, "Hermes", false, target.profile);
   else if (cron) openCronTarget(cron);
+  else if (location.hash === "#bots") showBots();
   else if (last) openSession(last.sessionId, last.title, false, last.profile);
   else show("list-screen");
 }

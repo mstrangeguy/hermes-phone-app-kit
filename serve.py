@@ -213,6 +213,7 @@ def page_request(method, target):
 STATIC = {
     "/": ("page/index.html", "text/html; charset=utf-8"),
     "/app.js": ("page/app.js", "text/javascript; charset=utf-8"),
+    "/lists.js": ("page/lists.js", "text/javascript; charset=utf-8"),
     "/app.css": ("page/app.css", "text/css; charset=utf-8"),
     "/vendor/marked.umd.js": ("page/vendor/marked.umd.js", "text/javascript; charset=utf-8"),
     "/vendor/purify.min.js": ("page/vendor/purify.min.js", "text/javascript; charset=utf-8"),
