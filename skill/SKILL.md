@@ -21,13 +21,13 @@ Run Python for this app with `scripts/py`, never a hardcoded interpreter path. I
 
 ## Rules
 
-- Never print, log, or commit `API_SERVER_KEY`, `TELEGRAM_BOT_TOKEN`, `HASS_TOKEN`, or the contents of `allowed-logins.txt`, `faceid.json`, `config.json`. Check a secret is set with `scripts/kit.py env-has`, never by reading it.
+- Never print, log, or commit `API_SERVER_KEY`, `TELEGRAM_BOT_TOKEN`, `HASS_TOKEN`, or the contents of `allowed-logins.txt`, `faceid.json`, `webpush.json`, `config.json`. Check a secret is set with `scripts/kit.py env-has`, never by reading it.
 - Never run `tailscale funnel` for this port, and never bind the proxy to anything but `127.0.0.1`. The login check trusts `Tailscale-User-Login` only because Tailscale Serve is the sole way in.
 - Do not run `tailscale serve reset`. Before changing Serve, save `tailscale serve status --json`. Afterwards, compare it with `scripts/kit.py serve-kept`.
 - Do not add an origin to `API_SERVER_CORS_ORIGINS`. The page works because the proxy strips `Origin`.
 - Do not add an inline `<script>`, `<style>`, `on*=` handler or `style=""` to `page/index.html`. The content policy blocks them silently. A new page file must be added to `STATIC` in `serve.py`, or it returns 404.
 - Restart the proxy with `launchctl kickstart -k gui/$(id -u)/com.hermes.phone-chat`, never by running `serve.py` by hand: that would fight launchd for the port. If the session you are in came through the phone page, a restart cuts it. Do proxy work from the CLI, the desktop app or Telegram.
-- Editing a `page/` file takes effect on the next page load. Editing `serve.py` or `faceid.py` needs a restart. The `alerts` block of `config.json` is re-read every 3 seconds.
+- Editing a `page/` file takes effect on the next page load. Editing `serve.py`, `faceid.py` or `webpush.py` needs a restart. The `alerts` block of `config.json` is re-read every 3 seconds.
 - `hermes plugins enable/disable phone-approvals` only with the desktop app quit: enabling while it runs makes the backend rediscover every plugin mid-turn.
 
 ## Tests

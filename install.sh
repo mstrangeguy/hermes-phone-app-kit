@@ -137,14 +137,18 @@ if [ -n "$current" ] && ! ask "Alerts already go to '$current'. Change that?" n;
 else
   has_tg=0; kit env-has "$ENV_FILE" TELEGRAM_BOT_TOKEN && has_tg=1
   has_ha=0; kit env-has "$ENV_FILE" HASS_TOKEN && has_ha=1
-  echo "   Alerts are short and generic (no commands or chat text). Tapping one opens the app."
+  echo "   Tapping an alert opens the app. Telegram and Home Assistant alerts are generic (no"
+  echo "   chat text). Web push is encrypted end to end, so it shows the session title."
+  echo "     w = web push to the Home Screen app (no other account needed)"
   [ "$has_tg" = 1 ] && echo "     t = Telegram, through the bot Hermes already uses"
   [ "$has_ha" = 1 ] && echo "     h = Home Assistant mobile app notification"
   echo "     n = no alerts"
-  default=n; [ "$has_tg" = 1 ] && default=t
+  default=w
   read -r -p "   Choice [$default] " choice || choice=""
   choice="${choice:-$default}"
   case "$choice" in
+    w|W)
+      kit config-alerts "$CONFIG" "{\"channel\": \"webpush\", \"url\": \"$URL\"}" ;;
     t|T)
       [ "$has_tg" = 1 ] || die "no TELEGRAM_BOT_TOKEN in $ENV_FILE."
       home="$(kit env-get "$ENV_FILE" TELEGRAM_HOME_CHANNEL)"
@@ -180,7 +184,10 @@ else
   esac
   chan="$(kit config-get "$CONFIG" alerts.channel)"
   ok "alerts: $chan"
-  if [ "$chan" != none ] && ask "Send one test alert now?" y; then
+  if [ "$chan" = webpush ]; then
+    echo "   On the iPhone: open the app from the Home Screen, tap the menu, Notifications: on,"
+    echo "   allow, then Send test. (iOS offers notifications only to the Home Screen app.)"
+  elif [ "$chan" != none ] && ask "Send one test alert now?" y; then
     (cd "$ROOT" && "$PY" -I serve.py --notify "Hermes phone app: test alert.") \
       && echo "   Sent. Check that it arrived on the phone." || warn "test alert failed; see $ROOT/serve.log"
   fi

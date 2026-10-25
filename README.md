@@ -8,7 +8,7 @@ It runs on the Mac that runs Hermes and is reachable only over your Tailscale ta
 
 - macOS, with Hermes installed in `~/.hermes` and its gateway running. Tested on Hermes `v2026.9.24` and `v0.22.0`.
 - Tailscale on the Mac and the iPhone, signed in to the same tailnet, with HTTPS certificates enabled for the tailnet (admin console → DNS → HTTPS Certificates).
-- A Telegram bot already set up in Hermes if you want alerts on Telegram. Home Assistant also works, or no alerts.
+- Alerts: web push to the Home Screen app needs nothing else (iOS 16.4+, best on 18.4+). Telegram (a bot already set up in Hermes) and Home Assistant also work, or no alerts.
 
 ## Install
 
@@ -27,7 +27,7 @@ The installer asks before each change. In order, it:
 1. Finds Hermes and its Python, and checks that the Python has `cryptography` (needed for Face ID). Older Hermes keeps it in `hermes-agent/venv`; current Hermes manages it itself. `scripts/py` finds either.
 2. Checks the Hermes API server, which runs when `API_SERVER_KEY` in `~/.hermes/.env` is set (16+ characters). If it is not, it offers to add a random key and `API_SERVER_ENABLED=true`. The key is never shown. The gateway must restart to pick that up; the installer asks, because a restart ends any reply running at that moment, including on Telegram.
 3. Reads your Tailscale login and writes it to `allowed-logins.txt`. Every request to the app must come from that login.
-4. Writes `config.json` and asks where alerts go: Telegram (through the bot Hermes already uses), Home Assistant, or none. For Telegram it uses your Hermes home channel (`/sethome`), or else your private chat with the bot. It can send one test alert.
+4. Writes `config.json` and asks where alerts go: web push (the default), Telegram (through the bot Hermes already uses), Home Assistant, or none. For Telegram it uses your Hermes home channel (`/sethome`), or else your private chat with the bot. It can send one test alert.
 5. Installs a LaunchAgent, `com.hermes.phone-chat`, that keeps the proxy running on `127.0.0.1:8643`. It checks that the proxy answers and that it refuses a request without your login.
 6. Publishes the proxy on your tailnet at `https://<this-mac>.<tailnet>.ts.net:8443/` with Tailscale Serve, tailnet only. It never uses Funnel. It stops if port 8443 is already used, and stops if adding it changed any other Serve or Funnel entry.
 7. Sets up Face ID and prints a setup code, valid for 10 minutes.
@@ -93,12 +93,26 @@ Written by the installer. Edit it by hand to change alerts; the alerts block is 
 | `port` | Local proxy port. Default 8643. Needs a proxy restart. |
 | `upstream_port` | Hermes API port. Default 8642. |
 | `hermes_home` | Hermes home. Default `~/.hermes`. |
-| `alerts.channel` | `telegram`, `homeassistant` or `none`. |
+| `alerts.channel` | `webpush`, `telegram`, `homeassistant` or `none`. |
 | `alerts.chat_id` | Telegram chat id. Empty means your Hermes home channel (`TELEGRAM_HOME_CHANNEL`, set with `/sethome`). |
 | `alerts.notify` | Home Assistant notify service, e.g. `mobile_app_my_iphone`. Uses `HASS_URL` and `HASS_TOKEN` from `.env`. |
-| `alerts.url` | Link opened from the alert. |
+| `alerts.url` | Link opened from the alert. Web push needs it: the Mac's `https://` address for this app. |
+| `alerts.subject` | Web push only, optional. The contact Apple sees for this sender, `mailto:` or `https:`. Default: the origin of `alerts.url`. Apple refuses made-up contacts (`localhost`, `.invalid`). |
 
-Alert text is always generic, for example "Hermes is waiting for your approval." No commands, file names or chat text are sent through Telegram or Apple.
+Telegram and Home Assistant alerts are generic, for example "Hermes is waiting for your approval." No commands, file names or chat text are sent through them.
+
+### Web push
+
+`webpush` sends alerts straight to the Home Screen app, with no other account. Turn it on from the phone: open the app from the Home Screen icon (iOS offers notifications only there, not in a Safari tab), tap the menu, **Notifications: on**, allow, then **Send test**. Each phone that turns it on gets every alert; **Notifications: off** stops it for that phone.
+
+- Each alert shows the session's title and a short line (Reply finished, Waiting for your approval, Could not finish the reply). Tapping it opens that session, after Face ID. No commands or reply text are sent.
+- The alert is encrypted on the Mac for the phone's own key (RFC 8291) and signed with a key made on this Mac (VAPID, RFC 8292). Apple's push service carries it but cannot read it. The Mac only connects out to the push service; nothing reaches the Mac from the internet.
+- The Home Screen icon shows a badge with the number of unread sessions.
+- iOS 18.4 or later shows the alert with no script running (Declarative Web Push). Older browsers use `page/sw.js`.
+- iOS gives web push no Time Sensitive level, so these alerts do not break through a Focus. Approval alerts are sent with high urgency.
+- If Tailscale is off on the phone, the alert still arrives, but the app opens only once Tailscale is back on.
+- Deleting the Home Screen icon ends that phone's subscription. Turn notifications on again after re-adding it.
+- The keys and the list of phones are in `webpush.json` (mode 600, never committed). Deleting it makes a new key; every phone must turn notifications on again.
 
 ## Security
 
@@ -139,10 +153,11 @@ scripts/py -I tests/plugin_test.py "$PWD" "$(mktemp -d)"
 |---|---|
 | `serve.py` | The proxy: serves the page, checks the login and Face ID, forwards to Hermes, sends alerts. |
 | `faceid.py` | Passkey checks. |
+| `webpush.py` | Web push: encryption, signing, the list of subscribed phones. |
 | `page/` | The app: HTML, JS, CSS, icon, plus local copies of marked and DOMPurify. |
 | `plugin/phone-approvals/` | Optional Hermes plugin. |
 | `scripts/` | `py` (finds Hermes's Python), installer helpers, the update check. |
-| `tests/` | Offline tests. None of them contacts a real phone, bot or Home Assistant. |
+| `tests/` | Offline tests. None of them contacts a real phone, bot, push service or Home Assistant. |
 | `skill/SKILL.md` | Instructions for your Hermes agent to maintain this app. |
 
 This app is MIT licensed (see `LICENSE`). Third-party code: marked (MIT) and DOMPurify (Apache-2.0 / MPL-2.0), licences in `page/vendor/`. The icon is Hermes's own (MIT), licence in `page/icon-LICENSE`.
