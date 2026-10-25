@@ -9,3 +9,4 @@ serve.log
 serve.pid
 __pycache__/
 *.tmp
+webpush.json

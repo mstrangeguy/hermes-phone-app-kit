@@ -144,7 +144,7 @@ check("decision file mode 600", oct(os.stat(path).st_mode & 0o777) == "0o600")
 
 # Alert: one push after the delay, none while the page is on screen.
 sent = []
-serve.send_alert = lambda config, message, urgent: sent.append((message, urgent)) or True
+serve.send_alert = lambda config, message, urgent, push=None: sent.append((message, urgent)) or True
 with serve._polls_lock:
     serve._polls.pop(serve.PAGE_KEY, None)
 alerted = set()

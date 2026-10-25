@@ -32,6 +32,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 import faceid  # noqa: E402
+import webpush  # noqa: E402
 # Per-install settings (port, Hermes home, alerts). Local and gitignored;
 # install.sh writes it. Every key is optional; see config.example.json.
 CONFIG_PATH = os.path.join(ROOT, "config.json")
@@ -220,6 +221,8 @@ STATIC = {
     "/vendor/purify.min.js": ("page/vendor/purify.min.js", "text/javascript; charset=utf-8"),
     "/manifest.webmanifest": ("page/manifest.webmanifest", "application/manifest+json"),
     "/icon-180.png": ("page/icon-180.png", "image/png"),
+    # Only for browsers without Declarative Web Push; iOS 18.4+ needs no worker.
+    "/sw.js": ("page/sw.js", "text/javascript; charset=utf-8"),
     "/theme.css": (None, "text/css; charset=utf-8"),
 }
 
@@ -264,6 +267,7 @@ CSP = (
     "img-src 'self' data: blob:; "
     "manifest-src 'self'; "
     "connect-src 'self'; "
+    "worker-src 'self'; "
     "base-uri 'none'; "
     "form-action 'none'; "
     "frame-ancestors 'none'"
@@ -896,10 +900,12 @@ def all_active():
     return (None if failed and not active else active), approvals
 
 
-def serve_active(client, lines):
+def serve_active(client, lines, target=""):
     if key_refused(client, lines):
         return
-    note_page()
+    # ?unread=N: the page's own unread count, the floor for the app badge.
+    unread = (query_of(target).get("unread") or [""])[0] if target else ""
+    note_page(int(unread) if unread.isdigit() else None)
     active, approvals = all_active()
     send_response(client, 200, "OK", json.dumps({"active": active, "approvals": approvals}), "application/json")
 
@@ -1686,11 +1692,94 @@ def serve_upload(client, target, lines, leftover):
 # key is added on this side, and Allow once needs a Face ID signature bound to
 # that one approval. Deny never needs Face ID: refusing is always safe.
 
+# --- Web Push -------------------------------------------------------------------
+# The page subscribes the Home Screen app here; alerts then go out through the
+# "webpush" channel (see Alerts). The endpoint a phone sends is checked against
+# the known push services before it is stored, because this Mac posts to it.
+
+PUSH_KEY_PATH = "/phone-api/push/key"
+PUSH_SUBSCRIBE_PATH = "/phone-api/push/subscribe"
+PUSH_UNSUBSCRIBE_PATH = "/phone-api/push/unsubscribe"
+PUSH_TEST_PATH = "/phone-api/push/test"
+PUSH_PATHS = (PUSH_KEY_PATH, PUSH_SUBSCRIBE_PATH, PUSH_UNSUBSCRIBE_PATH, PUSH_TEST_PATH)
+
+
+def push_base(config):
+    """The page's own https address (alerts.url): where a tapped alert opens."""
+    url = str((config or {}).get("url") or "")
+    return url if url.startswith("https://") else ""
+
+
+def push_subject(config):
+    """VAPID contact: alerts.subject, else the page's origin. Apple refuses
+    made-up contacts, so a bad one means no web push."""
+    subject = str((config or {}).get("subject") or "")
+    if not subject and push_base(config):
+        subject = webpush.audience(push_base(config))
+    return subject if webpush.subject_ok(subject) else ""
+
+
+def serve_push(client, target, lines, leftover, method, local):
+    if key_refused(client, lines):
+        return
+    settings = load_settings().get("alerts")
+    settings = settings if isinstance(settings, dict) else {}
+    try:
+        if local == PUSH_KEY_PATH and method == "GET":
+            endpoint = (query_of(target).get("endpoint") or [""])[0]
+            json_ok(client, {
+                "public_key": webpush.public_key(),
+                "subscribed": bool(endpoint) and webpush.is_subscribed(endpoint),
+                "ready": bool(push_base(settings) and push_subject(settings)),
+                "channel": str(settings.get("channel") or "none"),
+            })
+            return
+        if method != "POST":
+            json_error(client, 405, "Method Not Allowed", "bad_method", "Use POST")
+            return
+        try:
+            data = json.loads(read_body(client, lines, leftover).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            json_error(client, 400, "Bad Request", "bad_request", "Send JSON")
+            return
+        if not isinstance(data, dict):
+            data = {}
+        if local == PUSH_SUBSCRIBE_PATH:
+            if not webpush.add_subscription(data.get("subscription")):
+                json_error(client, 400, "Bad Request", "bad_subscription", "That push subscription was not accepted.")
+                return
+            log("web push: phone subscribed")
+            json_ok(client, {"ok": True})
+        elif local == PUSH_UNSUBSCRIBE_PATH:
+            if webpush.remove_subscription(str(data.get("endpoint") or "")):
+                log("web push: phone unsubscribed")
+            json_ok(client, {"ok": True})
+        elif local == PUSH_TEST_PATH:
+            endpoint = str(data.get("endpoint") or "")
+            if not webpush.is_subscribed(endpoint):
+                json_error(client, 409, "Conflict", "not_subscribed", "This phone is not subscribed. Turn notifications on first.")
+                return
+            subject = push_subject(settings)
+            if not subject:
+                json_error(client, 409, "Conflict", "no_subject",
+                           "Set alerts.url in config.json to this page's https address first.")
+                return
+            message = webpush.declarative(APP_NAME, "Test notification. Tap to open.", push_base(settings))
+            sent, problems = webpush.send_all(message, subject, only=endpoint)
+            log("web push test: %s" % ("sent" if sent else "failed: " + "; ".join(problems)))
+            json_ok(client, {"sent": sent, "problems": problems})
+        else:
+            json_error(client, 404, "Not Found", "not_found", "Unknown")
+    except ImportError:
+        log("web push: cryptography package missing")
+        json_error(client, 503, "Service Unavailable", "push_unavailable", "Web push needs the cryptography package.")
+
+
 AUTH_PREFIX = "/phone-api/auth/"
 # Answered here, not by Hermes: no key goes out for them.
 LOCAL_API = (BUSY_PATH, ACTIVE_PATH, DECIDE_PATH, PROFILES_PATH, META_PATH,
              CRON_PATH, CRON_RUNS_PATH, CRON_OUTPUT_PATH, UPLOAD_PATH, MEDIA_PATH,
-             REACTIONS_PATH, REACTIONS_UNSEEN_PATH, SEARCH_PATH)
+             REACTIONS_PATH, REACTIONS_UNSEEN_PATH, SEARCH_PATH) + PUSH_PATHS
 # Polls that must not keep a Face ID session awake.
 BACKGROUND = (BUSY_PATH, ACTIVE_PATH, PROFILES_PATH, META_PATH)
 RUN_APPROVAL = re.compile(r"^/v1/runs/([A-Za-z0-9_.:-]{1,128})/approval$")
@@ -1873,7 +1962,7 @@ def handle_client(client, upstream_addr=UPSTREAM):
             serve_busy(client, target, lines)
             return
         if local == ACTIVE_PATH and method == "GET":
-            serve_active(client, lines)
+            serve_active(client, lines, target)
             return
         if local == PROFILES_PATH and method == "GET":
             serve_profiles(client, lines)
@@ -1900,6 +1989,10 @@ def handle_client(client, upstream_addr=UPSTREAM):
         if local == MEDIA_PATH and method == "GET":
             # Not logged: the query is a file path.
             serve_media(client, target, lines)
+            return
+        if local in PUSH_PATHS:
+            # Logged inside (not the endpoint: it names the phone).
+            serve_push(client, target, lines, leftover, method, local)
             return
         log("%s %s" % (method, path))
         note_poll(method, rest)
@@ -1929,10 +2022,13 @@ def handle_client(client, upstream_addr=UPSTREAM):
 # edit takes effect without a restart:
 #   {"channel": "telegram", "chat_id": "123456789", "url": "https://<host>:8443/"}
 #   {"channel": "homeassistant", "notify": "mobile_app_my_iphone", "url": "..."}
+#   {"channel": "webpush", "url": "https://<host>:8443/"}   (optional "subject")
 # No block, or "channel": "none", turns alerts off. Secrets (TELEGRAM_BOT_TOKEN,
 # HASS_URL, HASS_TOKEN) are read from Hermes's .env at send time and never
-# logged. The text stays generic because it crosses Apple's or Telegram's
-# servers: no run ids, commands or session text.
+# logged. Telegram and Home Assistant text stays generic because it crosses
+# their servers readable: no run ids, commands or session text. Web push is
+# end-to-end encrypted to the phone, so it carries the session title and opens
+# that session when tapped; it never carries commands or reply text.
 
 WATCH_TICK = 3
 # The page polls a live run every 2 seconds while it is on screen. iOS freezes
@@ -1976,9 +2072,68 @@ def watching(run_id):
 PAGE_KEY = "\0page"
 
 
-def note_page():
+# Home Screen badge sent with each web push: the page's own unread count at its
+# last poll plus the sessions alerted since. Opening the page resets it.
+_badge = {"base": 0, "sessions": set()}
+
+
+def note_page(unread=None):
     with _polls_lock:
         _polls[PAGE_KEY] = time.monotonic()
+        _badge["sessions"].clear()
+        if unread is not None:
+            _badge["base"] = min(int(unread), 999)
+
+
+def badge_for(session_key):
+    with _polls_lock:
+        if session_key:
+            _badge["sessions"].add(session_key)
+        return _badge["base"] + len(_badge["sessions"])
+
+
+def hash_for(session_id, profile):
+    """The page's link to one session (app.js hashFor)."""
+    if not session_id:
+        return ""
+    link = "#s=" + urllib.parse.quote(session_id, safe="")
+    if profile and profile != "default":
+        link += "&p=" + urllib.parse.quote(profile, safe="")
+    return link
+
+
+def session_title(profile, session_id):
+    """The session's title for the alert, from state.db (read-only). A
+    compressed session's title may sit on an earlier part of its lineage."""
+    if not SESSION_ID.match(str(session_id or "")):
+        return ""
+    path = profile_file(profile, "state.db", STATE_DB)
+    if not os.path.exists(path):
+        return ""
+    try:
+        conn = ro_connect(path)
+        try:
+            current, seen = session_id, set()
+            while current and current not in seen and len(seen) < 50:
+                seen.add(current)
+                row = conn.execute("SELECT title, parent_session_id FROM sessions WHERE id = ?",
+                                   (current,)).fetchone()
+                if not row:
+                    break
+                if row[0] and str(row[0]).strip():
+                    return " ".join(str(row[0]).split())[:120]
+                current = row[1]
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        pass
+    return ""
+
+
+def push_alert(profile, session_id, body):
+    """What a web push shows: the session title, a short line, and the link."""
+    return {"title": session_title(profile, session_id) or APP_NAME, "body": body,
+            "link": hash_for(session_id, profile), "session": "%s/%s" % (profile or "default", session_id or "")}
 
 
 # A desktop approval alerts only after this long, so answering it at the desk
@@ -1998,7 +2153,9 @@ def check_desktop(config, approvals, alerted, now=None):
             # The page is on screen and already shows it; never alert for this one later.
             alerted.add(rid)
             continue
-        if send_alert(config, "%s is waiting for your approval on the desktop." % APP_NAME, True):
+        push = push_alert(item.get("profile") or "default", item.get("session_key"),
+                          "Waiting for your approval on the desktop.")
+        if send_alert(config, "%s is waiting for your approval on the desktop." % APP_NAME, True, push):
             alerted.add(rid)
             log("alert sent: desktop approval")
     alerted.intersection_update(open_ids)
@@ -2010,7 +2167,10 @@ def alert_config():
     if not isinstance(config, dict):
         return None
     channel = str(config.get("channel") or ("homeassistant" if config.get("notify") else ""))
-    if channel == "homeassistant":
+    if channel == "webpush":
+        if not push_base(config) or not push_subject(config):
+            return None
+    elif channel == "homeassistant":
         if not NOTIFY_NAME.match(str(config.get("notify") or "")):
             return None
     elif channel == "telegram":
@@ -2082,9 +2242,33 @@ def telegram_request(config, message, urgent):
 ALERT_CHANNELS = {"homeassistant": homeassistant_request, "telegram": telegram_request}
 
 
-def send_alert(config, message, urgent):
+def webpush_send(config, push, urgent):
+    """One alert to every subscribed phone. iOS gives web push no Time
+    Sensitive level, so urgent only raises the push service's Urgency."""
+    if not webpush.subscriptions():
+        log("alert skipped: no phone has turned notifications on")
+        return False
+    message = webpush.declarative(push["title"], push["body"], push_base(config) + (push.get("link") or ""),
+                                  badge_for(push.get("session")) if push.get("session") else None)
+    try:
+        sent, problems = webpush.send_all(message, push_subject(config), urgent)
+    except ImportError:
+        log("alert failed: web push needs the cryptography package")
+        sent, problems = 0, []
+    for problem in problems:
+        log("alert failed: web push %s" % problem)
+    if not sent:
+        _last_fail[0] = time.monotonic()
+    return bool(sent)
+
+
+def send_alert(config, message, urgent, push=None):
+    """message is the generic text for Telegram and Home Assistant; push is the
+    web push form (push_alert), defaulting to the app name and message."""
     if backing_off():
         return False
+    if config.get("channel") == "webpush":
+        return webpush_send(config, push or {"title": APP_NAME, "body": message, "link": ""}, urgent)
     request = ALERT_CHANNELS[config.get("channel") or "homeassistant"](config, message, urgent)
     if request is None:
         _last_fail[0] = time.monotonic()
@@ -2138,7 +2322,8 @@ def check_runs(config, runs, known, alerted):
             key = "%s:%s" % (run_id, approval.get("request_id") or status.get("updated_at"))
             if key in alerted or watching(run_id):
                 continue
-            if send_alert(config, "%s is waiting for your approval." % APP_NAME, True):
+            push = push_alert(status.get("_profile"), status.get("session_id"), "Waiting for your approval.")
+            if send_alert(config, "%s is waiting for your approval." % APP_NAME, True, push):
                 alerted.add(key)
                 log("alert sent: approval")
         elif now in TERMINAL and before is not None and before not in TERMINAL:
@@ -2146,7 +2331,9 @@ def check_runs(config, runs, known, alerted):
             if now == "cancelled" or watching(run_id):
                 continue
             text = ("%s finished your reply." if now == "completed" else "%s could not finish your reply.") % APP_NAME
-            if send_alert(config, text, False):
+            push = push_alert(status.get("_profile"), status.get("session_id"),
+                              "Reply finished." if now == "completed" else "Could not finish the reply.")
+            if send_alert(config, text, False, push):
                 log("alert sent: %s" % now)
     for run_id in [r for r in known if r not in runs]:
         del known[run_id]
@@ -2176,7 +2363,9 @@ def watch_runs():
                     # Every profile's phone runs. Run ids are unique across profiles.
                     runs = {}
                     for name in served_profiles():
-                        runs.update(read_runs(profile_file(name, "runs_idempotency.db", RUNS_DB)))
+                        for run_id, status in read_runs(profile_file(name, "runs_idempotency.db", RUNS_DB)).items():
+                            status["_profile"] = name
+                            runs[run_id] = status
                 if known is None:
                     # Start from what is already there, so a restart does not
                     # replay old finishes. A pending approval still alerts.
