@@ -108,6 +108,16 @@ ok("badge: empty set counts 0", bc(new Set(), rows, false) === 0 && bc(new Set()
 ok("badge: mixed set counts only shown rows", bc(new Set(["d1", "c1", "b1", "t1", "gone"]), rows, false) === 1);
 ok("badge: takes an array and tolerates junk", bc(["d1", "a1"], rows, false) === 2 && bc(null, rows, false) === 0 && bc(new Set(["d1"]), null, false) === 0);
 
+// Shared read state: the Mac's answer wins for chats Hermes tracks.
+const eu = L.effectiveUnread;
+const has = (s, id) => Array.from(s).includes(id);
+ok("read: Mac-unread chat is unread with no local mark", has(eu([], { d1: { unread: true, profile: "default" } }), "d1"));
+ok("read: read on the Mac clears a local mark", !has(eu(["d1"], { d1: { unread: false, profile: "default" } }), "d1"));
+ok("read: untracked chat keeps its local mark", has(eu(["a1"], { d1: { unread: false } }), "a1"));
+ok("read: no read state = local marks only", Array.from(eu(["a1", "d1"], undefined)).length === 2 && Array.from(eu(["a1"], null)).length === 1);
+ok("read: junk entries ignored", Array.from(eu([], { x: null, y: { unread: "yes" } })).length === 0);
+ok("read: badge counts Mac-unread rows", bc(eu([], { d1: { unread: true } }), rows, false) === 1);
+
 async function paging() {
   // A page that is mostly cron: 48 cron + 2 own, then a page of own chats.
   const pages = [
@@ -248,7 +258,16 @@ check("no inline script or style, no on* handlers",
       not re.search(r"\son[a-z]+\s*=", html) and not re.search(r'\sstyle="', html))
 check("main list uses mainRows", re.search(r"function ownSessions\(\)[\s\S]{0,400}PhoneLists\.mainRows", app))
 check("badge uses badgeCount with the View setting",
-      "PhoneLists.badgeCount(unreadSet(), state.sessions, VIEW.allSources)" in app)
+      "PhoneLists.badgeCount(shownUnreadIds(), state.sessions, VIEW.allSources)" in app)
+check("unread = local marks merged with the Mac's read state",
+      "PhoneLists.effectiveUnread(unreadSet(), ACTIVE.read)" in app)
+check("dots use the merged unread set", 'return shownUnreadIds().has(id) ? "unread" : "";' in app)
+check("opening a chat marks it read on the Mac",
+      re.search(r"function markRead\(id\) \{[\s\S]{0,200}markReadOnMac\(id\);", app)
+      and re.search(r"function markReadOnMac\(id\) \{[\s\S]{0,400}method: \"PATCH\",\s*body: JSON\.stringify\(\{ unread: false \}\)", app))
+check("only Mac-unread chats are patched", "if (!known || known.unread !== true || READS.pending.has(id)) return;" in app)
+check("an open chat that turns unread on the Mac is read there",
+      re.search(r"ACTIVE\.read = data\.read[\s\S]{0,300}markReadOnMac\(state\.sessionId\)", app))
 check("no badge from the raw unread set", not re.search(r"setBadge\(\s*set\.size", app) and "unread=\" + unreadSet().size" not in app)
 check("badge waits for the first list load", re.search(r"function shownUnread\(\)\s*\{\s*if \(!LIST\.loaded\) return null;", app))
 check("unread= left out before the first list load", 'unread === null ? "" : "?unread=" + unread' in app)

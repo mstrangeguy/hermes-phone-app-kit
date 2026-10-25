@@ -74,6 +74,23 @@
     return shown.size;
   }
 
+  // Which chats are unread. Hermes keeps a read watermark for chats the
+  // desktop app tracks (the desktop's green dots); for those the Mac's answer
+  // wins, so a chat read on the desktop clears here too. Chats Hermes does
+  // not track keep the phone's own marks. read is the proxy's
+  // {id: {unread, profile}}.
+  function effectiveUnread(localIds, read) {
+    const known = read && typeof read === "object" ? read : {};
+    const out = new Set();
+    for (const id of Array.from(localIds || [])) {
+      if (!Object.prototype.hasOwnProperty.call(known, id)) out.add(id);
+    }
+    for (const id of Object.keys(known)) {
+      if (known[id] && known[id].unread === true) out.add(id);
+    }
+    return out;
+  }
+
   // Paging with client-side filtering: a page of 50 can come back almost
   // empty (a run of cron sessions), so keep asking for the next page until
   // the screen has a full page, the server has no more, or the cap is hit.
@@ -142,7 +159,7 @@
 
   root.PhoneLists = {
     MESSAGING, PLATFORM_LABEL, BOT_CHAT_TITLE,
-    isMessaging, isCron, isBotChat, isOwnChat, mainRows, badgeCount, fillPages, pageStep,
+    isMessaging, isCron, isBotChat, isOwnChat, mainRows, badgeCount, effectiveUnread, fillPages, pageStep,
     pickBotChat, messagingGroups, jobDot
   };
 })(typeof window !== "undefined" ? window : globalThis);

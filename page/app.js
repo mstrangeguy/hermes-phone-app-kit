@@ -979,7 +979,9 @@ function listError(e) {
 // approval, accent = working, green = finished since you last opened it.
 // The proxy's /phone-api/active lists every session with a live turn (any
 // window); approvals are known only for replies started on this page.
-const ACTIVE = { map: {}, timer: 0, checking: false, every: 5000 };
+const ACTIVE = { map: {}, read: {}, timer: 0, checking: false, every: 5000 };
+// Read-state writes in flight (id), so a poll does not send the same PATCH twice.
+const READS = { pending: new Set() };
 const UNREAD_NAME = "hermes.phone.unread";
 
 function unreadSet() {
@@ -992,7 +994,26 @@ function saveUnread(set) {
 function markRead(id) {
   const set = unreadSet();
   if (set.delete(id)) saveUnread(set);
+  markReadOnMac(id);
   refreshBadge();
+}
+
+// Opening a chat the Mac lists as unread marks it read there too, the same
+// PATCH the desktop sends, so the desktop's green dot clears. Chats Hermes
+// does not track are left alone. The next /phone-api/active poll is the truth.
+function markReadOnMac(id) {
+  const known = ACTIVE.read[id];
+  if (!known || known.unread !== true || READS.pending.has(id)) return;
+  known.unread = false;
+  READS.pending.add(id);
+  api(inProfile(known.profile, "/api/sessions/" + encodeURIComponent(id)), {
+    method: "PATCH",
+    body: JSON.stringify({ unread: false })
+  }).catch(() => {}).finally(() => READS.pending.delete(id));
+}
+
+function shownUnreadIds() {
+  return PhoneLists.effectiveUnread(unreadSet(), ACTIVE.read);
 }
 
 // The badge counts only unread chats the list shows: cron runs and bot chats
@@ -1000,7 +1021,7 @@ function markRead(id) {
 // chat. null until the list first loads, so a launch does not clear it.
 function shownUnread() {
   if (!LIST.loaded) return null;
-  return PhoneLists.badgeCount(unreadSet(), state.sessions, VIEW.allSources);
+  return PhoneLists.badgeCount(shownUnreadIds(), state.sessions, VIEW.allSources);
 }
 function refreshBadge() {
   const count = shownUnread();
@@ -1015,7 +1036,7 @@ function sessionDot(id) {
   if (DESKTOP.list.some((a) => Array.isArray(a.sessions) && a.sessions.includes(id) && !a.sent)) return "approval";
   const live = ACTIVE.map[id];
   if (live) return live.state === "approval" ? "approval" : "working";
-  return unreadSet().has(id) ? "unread" : "";
+  return shownUnreadIds().has(id) ? "unread" : "";
 }
 
 const DOT_LABEL = { approval: "Waiting for your approval", working: "Working", unread: "Finished, not opened yet" };
@@ -1032,6 +1053,10 @@ async function checkActive() {
     if (!data.active || typeof data.active !== "object") return;
     const before = ACTIVE.map;
     ACTIVE.map = data.active;
+    // Hermes's read state (absent from an older proxy: the phone's own marks only).
+    ACTIVE.read = data.read && typeof data.read === "object" ? data.read : {};
+    // Unread on the Mac while open here: read it there too.
+    if (state.sessionId && !$("chat-screen").hidden) markReadOnMac(state.sessionId);
     setDesktopApprovals(Array.isArray(data.approvals) ? data.approvals : []);
     // A turn that ended while you were not looking at it becomes unread.
     const set = unreadSet();
