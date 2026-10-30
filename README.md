@@ -57,6 +57,7 @@ In a chat:
 - **Search.** The box above the Sessions list searches chat titles and message text across every chat in the profiles in view, not just the loaded ones. Results replace the list until you clear the box.
 - **Reactions.** Double-tap a message for the six Tapbacks (❤️ 👍 👎 😂 ‼️ ❓). Tap your own reaction to take it back. They are the desktop app's reactions, kept in Hermes, so both apps show them, and Hermes's own reactions appear too. Your reactions are passed to the agent with your next message, as the desktop does. They follow the desktop setting Settings → Appearance → message reactions (`display.message_reactions` in that profile's `config.yaml`); with it off, the phone hides them. The agent cannot react to a message sent from the phone yet: on the API server, Hermes looks the message up under the run, not the chat.
 - **Task list.** When the agent keeps a task list, a card above the message box shows progress ("3/7") and the step in hand; tap it for the whole list. It shows while a reply runs, here or on the desktop, and stays after for that turn until you close it. Task-list steps in the chat read as progress and open as a checklist.
+- **Chats started on a Desktop, in a terminal or on a messaging app (Hermes v0.22+).** From v0.22.5 Hermes's HTTP API takes phone messages only in chats started on the phone or in Bot Chats. On those Hermes versions the phone sends into every other chat through the Hermes gateway instead, the way the desktop app does (`desktop_send.py`). Text and pictures both work. The reply appears when Hermes saves it: these messages have no live streaming, no Stop and no guidance, and the box waits until the reply is done. If the chat is open in a Desktop that connects to this Mac remotely, Hermes refuses and the phone says "This chat is open on another Desktop"; nothing is written to the chat. Send it from that Desktop, or quit Hermes there and try again in a minute. Chats started on the phone, and every chat on Hermes before v0.22, work as before.
 - **Pin and Archive** are in the session menu, next to Rename, Fork and Delete. Open it with ••• or by tapping the chat's title (handy when a phone's camera sits over the top-right corner). Archived chats are under View → Show → Archived.
 
 If the code expired: `cd ~/.hermes/phone-chat && scripts/py -I serve.py --setup-code`
@@ -93,6 +94,7 @@ Written by the installer. Edit it by hand to change alerts; the alerts block is 
 | `port` | Local proxy port. Default 8643. Needs a proxy restart. |
 | `upstream_port` | Hermes API port. Default 8642. |
 | `hermes_home` | Hermes home. Default `~/.hermes`. |
+| `desktop_image_refs` | `true` also adds the phone's `@image:` lines to messages sent into Desktop chats on Hermes v0.22+, for Desktops older than v0.22 that show only those. Off by default: with it on, the model may get each picture twice. Read on each send. |
 | `alerts.channel` | `webpush`, `telegram`, `homeassistant` or `none`. |
 | `alerts.chat_id` | Telegram chat id. Empty means your Hermes home channel (`TELEGRAM_HOME_CHANNEL`, set with `/sethome`). |
 | `alerts.notify` | Home Assistant notify service, e.g. `mobile_app_my_iphone`. Uses `HASS_URL` and `HASS_TOKEN` from `.env`. |
@@ -123,6 +125,7 @@ This app is a remote control for an agent that can run commands on your Mac. Rea
 - With Face ID enrolled, the phone never holds the Hermes API key. The Mac adds it to each request. Opening the app runs Face ID with no tap (iOS allows one such prompt per page load; if it refuses, tap Unlock). The app locks as soon as it leaves the screen, and after 10 minutes without a touch; replies keep running on the Mac. The Mac also ends an unlock after 30 minutes idle or 12 hours. Allow once needs a fresh Face ID check tied to that one prompt. Deny never needs it.
 - The page loads nothing from other sites. Its content policy blocks inline scripts, and model output is cleaned before display.
 - Attachments (the + in the message box opens the iOS picker: Photo Library, Take Photo, Choose File) are saved where the Hermes desktop app saves its own: pictures in `<Hermes home>/images/`, other files in `<Hermes home>/attachments/` under their own name (never overwriting; files 600). A photo is shrunk on the phone first, which also drops its location data. Files are sent unchanged, up to 25 MB. The message lists them as the desktop's `@image:` / `@file:` lines, so both apps show them from history; Hermes opens a file with its own tools when it reads the message. Delete old ones there whenever you like. Pictures Hermes sends back (`MEDIA:/path` in a reply) are fetched through the proxy: image files only, judged by their contents, from your home or temp folders only, behind the same login and Face ID checks. Paths are never logged.
+- Messages into Desktop chats on Hermes v0.22+ go through `desktop_send.py`, which the proxy runs as a separate process on Hermes's Python. It connects to the gateway the way the desktop app and `hermes chat --resume` do: as the same macOS user, through the gateway's private socket, with no password or key. It passes on only pictures this page uploaded. `serve.log` gets one line per send, with no text, paths or chat id.
 - The proxy reads Hermes's session database directly for the list extras, cron runs and search (read-only), and writes to it in one place only: the reactions field of a message, when you react. Hermes's own API has no reaction or full-text search routes. Search queries are not logged.
 - If this Mac is managed by an employer, check with them before opening a remote path into it.
 
@@ -153,6 +156,7 @@ scripts/py -I tests/plugin_test.py "$PWD" "$(mktemp -d)"
 |---|---|
 | `serve.py` | The proxy: serves the page, checks the login and Face ID, forwards to Hermes, sends alerts. |
 | `faceid.py` | Passkey checks. |
+| `desktop_send.py` | Sends a phone message into a Desktop chat through the Hermes gateway (Hermes v0.22+). |
 | `webpush.py` | Web push: encryption, signing, the list of subscribed phones. |
 | `page/` | The app: HTML, JS, CSS, icon, plus local copies of marked and DOMPurify. |
 | `plugin/phone-approvals/` | Optional Hermes plugin. |

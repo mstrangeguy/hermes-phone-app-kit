@@ -35,7 +35,7 @@ Run Python for this app with `scripts/py`, never a hardcoded interpreter path. I
 Run every suite with Hermes's venv Python, each with its own empty scratch folder:
 
 ```bash
-for t in plugin faceid approvals alerts busy profiles cron look pictures bots chat; do
+for t in plugin faceid approvals alerts busy profiles cron look pictures bots chat webpush desktopsend; do
   scripts/py -I tests/${t}_test.py "$PWD" "$(mktemp -d)" | tail -1
 done
 ```
@@ -43,6 +43,7 @@ done
 - `bots_test.py` runs `page/lists.js` (main-list, Bots and Cron rules) in node: from `PATH`, `$NODE`, or the copy Hermes keeps beside its checkout (`<Hermes home>/node/bin/node`). Keep list rules in `lists.js`, not `app.js`, so they stay testable.
 - Re-run `plugin_test.py` after every `hermes update`. It drives Hermes's real approval code; set `HERMES_AGENT_DIR` to test another checkout.
 - Any test importing `serve` or `faceid` must point `serve.CONFIG_PATH`, `faceid.CONFIG_PATH` and `faceid.SETUP_PATH` into its scratch folder. Otherwise a live enrolled passkey locks the API-key path and the test fails for the wrong reason. Keep the `FAIL ISOLATION` guard in new tests.
+- `desktopsend_test.py` injects a fake gateway client into `desktop_send.py`, both directly and as a fake `hermes_cli/gateway_client.py` in a scratch agent folder, so the real subprocess path runs. It never talks to a real gateway. Keep page rules for gateway sends in `page/chatparts.js` so node can test them.
 - Never test alerts by starting a real run. `alerts_test.py` uses fake Home Assistant and Telegram servers. To check the real channel once: `serve.py --notify "test"`.
 
 ## Troubleshooting
@@ -50,6 +51,8 @@ done
 - **403 "limited to its owner's Tailscale login":** the phone's Tailscale login is not in `allowed-logins.txt`. Lines starting with `#` are comments.
 - **"Locked" loop or Face ID fails:** the passkey is bound to the host name in `faceid.json`. If the Mac's tailnet name changed, re-run `install.sh` and choose to reset Face ID, then enrol again with a new setup code.
 - **Page does not load on the phone with iCloud Private Relay on:** the tailnet policy is missing the `disable-split-dns-when-no-custom-resolvers` node attribute (see README). This Mac cannot open its own tailnet name, so a local test proves nothing; the phone is the test.
+- **"This chat is open on another Desktop"** when sending into a Desktop chat (Hermes v0.22+): a Desktop connected to this Mac through `hermes serve` holds the chat (`<Hermes home>/runtime/active_sessions.json`). Nothing was written. Send from that Desktop, or quit Hermes there; serve lets go about 20 s later.
+- **A Desktop chat reply never shows on the phone:** messages into chats not started on the phone go through `desktop_send.py` and the gateway on Hermes v0.22+. Check `serve.log` for `desktop send:` lines, and `GET /phone-api/meta` for `"desktop_send": true`.
 - **A phone message waits forever:** another reply is running in that session (`session_turn_leases` in `state.db`), or it is paused on an approval. It continues when that turn ends.
 - **"alert failed: HTTP 400/401/403"** in `serve.log`: wrong chat id, the bot is blocked by the user, or the token is wrong. Telegram bots can only message chats that messaged them first.
 - **The proxy will not start after a Hermes update** (`serve.log` says it cannot find Hermes's Python): run `scripts/py --which`. If it fails, set `HERMES_AGENT_DIR` or `PHONE_APP_PYTHON` in the LaunchAgent, or re-run `./install.sh`.

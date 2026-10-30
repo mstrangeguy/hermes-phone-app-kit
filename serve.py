@@ -17,6 +17,7 @@ import socket
 import socketserver
 import stat
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
@@ -984,10 +985,13 @@ def serve_meta(client, target, lines):
         return
     ids = [i for i in ",".join(query.get("ids") or []).split(",") if i]
     try:
-        body = json.dumps(session_meta(profile, ids, (query.get("archived") or [""])[0] == "1"))
+        data = session_meta(profile, ids, (query.get("archived") or [""])[0] == "1")
     except sqlite3.Error as exc:
         log("meta (%s): %s" % (profile, type(exc).__name__))
-        body = json.dumps({"meta": {}, "archived": None})
+        data = {"meta": {}, "archived": None}
+    # Whether a message into a chat started on a Desktop goes through the gateway (Hermes v0.22+).
+    data["desktop_send"] = desktop_send_ok()
+    body = json.dumps(data)
     send_response(client, 200, "OK", body, "application/json")
 
 
@@ -1757,10 +1761,178 @@ def serve_upload(client, target, lines, leftover):
         log("upload: %s" % type(exc).__name__)
         json_error(client, 507, "Insufficient Storage", "not_saved", "Could not save the %s" % what)
         return
+    if not as_file:
+        remember_upload(profile, path)
     log("upload: %s, %d bytes" % (what, len(data)))
     body = {"path": path, "name": name, "size": len(data),
             "type": kind[0] if kind else "application/octet-stream"}
     send_response(client, 201, "Created", json.dumps(body), "application/json")
+
+
+# --- Desktop chats on Hermes v0.22+ -------------------------------------------
+# Hermes v0.22.5 refuses an HTTP turn (/v1/runs and the rest) in any chat whose
+# source is not api_server or bot_room, so the phone cannot post into a chat
+# started on a Desktop that way. POST /phone-api/desktop-send?profile=<p> hands
+# the message to desktop_send.py, which admits it through the gateway's own
+# WebSocket, the way the Desktop does. The helper runs as a subprocess on
+# Hermes's Python (scripts/py -I) with that profile's HERMES_HOME, so no Hermes
+# module loads in this process. It answers once the message is queued; the
+# page then follows the reply through /phone-api/busy and the saved history.
+# Only pictures this proxy saved through /phone-api/upload may be passed on.
+# One log line per send, with no text, paths or session id.
+# /phone-api/meta says "desktop_send": true only when Hermes's Python can import
+# hermes_cli.gateway_client (v0.22+); on older Hermes nothing changes.
+# config.json "desktop_image_refs": true also adds the phone's @image: lines to
+# the text (off by default: the model may then see each picture twice).
+
+DESKTOP_SEND_PATH = "/phone-api/desktop-send"
+DESKTOP_HELPER = os.path.join(ROOT, "desktop_send.py")
+DESKTOP_TIMEOUT = 75        # the helper's own deadline is 60 s
+DESKTOP_CHECK_TIMEOUT = 30
+DESKTOP_CHECK_TTL = 300     # a Hermes update can add or remove the client
+DESKTOP_BODY_MAX = 256 * 1024
+DESKTOP_TEXT_MAX = 200000
+DESKTOP_PICTURES_MAX = 8
+UPLOADED_TTL = 24 * 3600
+UPLOADED_MAX = 500
+_UPLOADED = {}              # real path -> (profile, time saved)
+_UPLOADED_LOCK = threading.Lock()
+_DESKTOP_CAP = {"at": None, "ok": False}
+_DESKTOP_CAP_LOCK = threading.Lock()
+
+
+def remember_upload(profile, path):
+    now = time.time()
+    with _UPLOADED_LOCK:
+        for old in [p for p, (_n, t) in _UPLOADED.items() if now - t > UPLOADED_TTL]:
+            del _UPLOADED[old]
+        while len(_UPLOADED) >= UPLOADED_MAX:
+            del _UPLOADED[min(_UPLOADED, key=lambda p: _UPLOADED[p][1])]
+        _UPLOADED[os.path.realpath(path)] = (profile, now)
+
+
+def uploaded_picture(profile, raw):
+    """The real path of a picture /phone-api/upload saved for *profile*, or None."""
+    if not isinstance(raw, str) or not raw or "\x00" in raw or not os.path.isabs(raw):
+        return None
+    path = os.path.realpath(raw)
+    with _UPLOADED_LOCK:
+        entry = _UPLOADED.get(path)
+    if not entry or entry[0] != profile or time.time() - entry[1] > UPLOADED_TTL:
+        return None
+    if not under(path, os.path.realpath(os.path.join(profile_home(profile), IMAGE_DIR))):
+        return None
+    return path if os.path.isfile(path) else None
+
+
+def helper_env(profile):
+    env = {k: v for k, v in os.environ.items() if not k.startswith("HERMES_SESSION_")}
+    env["HERMES_HOME"] = os.path.abspath(profile_home(profile))
+    env.setdefault("HERMES_AGENT_DIR", os.path.join(HERMES_HOME, "hermes-agent"))
+    # This process already runs on Hermes's Python; scripts/py need not look it up again.
+    env.setdefault("PHONE_APP_PYTHON", sys.executable)
+    return env
+
+
+def run_helper(profile, args, request, timeout):
+    """desktop_send.py's JSON answer, or None (no answer in time, or not JSON).
+    Its stderr is dropped: Hermes's own logging must not reach serve.log."""
+    command = ["/bin/bash", os.path.join(ROOT, "scripts", "py"), "-I", DESKTOP_HELPER] + list(args)
+    try:
+        proc = subprocess.run(command, input=json.dumps(request).encode("utf-8"), stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL, timeout=timeout, env=helper_env(profile), cwd=ROOT)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    lines = proc.stdout.decode("utf-8", "replace").strip().splitlines()
+    try:
+        answer = json.loads(lines[-1]) if lines else None
+    except ValueError:
+        return None
+    return answer if isinstance(answer, dict) else None
+
+
+def desktop_send_ok():
+    """Whether this Hermes has the gateway client (v0.22+). Checked in a
+    subprocess, kept for DESKTOP_CHECK_TTL."""
+    with _DESKTOP_CAP_LOCK:
+        now = time.monotonic()
+        if _DESKTOP_CAP["at"] is None or now - _DESKTOP_CAP["at"] > DESKTOP_CHECK_TTL:
+            answer = run_helper("default", ["--check"], {}, DESKTOP_CHECK_TIMEOUT)
+            _DESKTOP_CAP["ok"] = bool(answer and answer.get("ok") is True)
+            _DESKTOP_CAP["at"] = now
+        return _DESKTOP_CAP["ok"]
+
+
+def read_desktop_body(client, lines, leftover):
+    _fields, _names, length, chunked = header_map(lines)
+    if chunked or length is None or length > DESKTOP_BODY_MAX:
+        raise ValueError("body length")
+    return read_exact(client, leftover, length)
+
+
+DESKTOP_STATUS = {
+    "invalid_params": (400, "Bad Request"),
+    "picture_unreadable": (400, "Bad Request"),
+    "not_found": (404, "Not Found"),
+    "gateway_unavailable": (502, "Bad Gateway"),
+    "no_gateway_client": (501, "Not Implemented"),
+    "unconfirmed": (504, "Gateway Timeout"),
+}
+
+
+def serve_desktop_send(client, target, lines, leftover):
+    if key_refused(client, lines):
+        return
+    profile = query_profile(client, query_of(target))
+    if profile is None:
+        return
+    try:
+        data = json.loads(read_desktop_body(client, lines, leftover).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        json_error(client, 400, "Bad Request", "bad_request", "Send JSON with session_id, text and pictures")
+        return
+    data = data if isinstance(data, dict) else {}
+    session_id = data.get("session_id")
+    text = data.get("text") if isinstance(data.get("text"), str) else ""
+    raw = data.get("pictures") if isinstance(data.get("pictures"), list) else []
+    if not isinstance(session_id, str) or not SESSION_ID.match(session_id):
+        json_error(client, 400, "Bad Request", "bad_session", "Bad session id")
+        return
+    if len(text) > DESKTOP_TEXT_MAX or len(raw) > DESKTOP_PICTURES_MAX:
+        json_error(client, 413, "Payload Too Large", "too_large", "That message is too large")
+        return
+    pictures = [uploaded_picture(profile, p) for p in raw]
+    if not all(pictures):
+        log("desktop send: refused, picture not from upload")
+        json_error(client, 400, "Bad Request", "not_uploaded", "A picture was not sent from this page")
+        return
+    if not text.strip() and not pictures:
+        json_error(client, 400, "Bad Request", "empty", "Nothing to send")
+        return
+    if not desktop_send_ok():
+        json_error(client, 501, "Not Implemented", "no_gateway_client",
+                   "This Hermes cannot take phone messages into Desktop chats (it needs v0.22 or newer)")
+        return
+    request = {"session_id": session_id, "text": text, "pictures": pictures,
+               "image_refs": load_settings().get("desktop_image_refs") is True}
+    answer = run_helper(profile, [], request, DESKTOP_TIMEOUT)
+    if answer is None:
+        answer = {"ok": False, "reason": "unconfirmed",
+                  "message": "Hermes did not confirm the message. It may still arrive, "
+                             "so check the chat before sending it again."}
+    reason = answer.get("reason") if isinstance(answer.get("reason"), str) else "request_failed"
+    reason = reason if re.match(r"^[A-Za-z0-9_]{1,80}$", reason) else "request_failed"
+    count = len(pictures)
+    log("desktop send: %s, %d picture%s" % ("queued" if answer.get("ok") else "refused " + reason,
+                                            count, "" if count == 1 else "s"))
+    if answer.get("ok"):
+        body = {"ok": True, "admission_id": str(answer.get("admission_id") or ""),
+                "status": str(answer.get("status") or ""), "session_id": str(answer.get("session_id") or session_id)}
+        send_response(client, 202, "Accepted", json.dumps(body), "application/json")
+        return
+    status, phrase = DESKTOP_STATUS.get(reason, (409, "Conflict"))
+    message = answer.get("message") if isinstance(answer.get("message"), str) else ""
+    json_error(client, status, phrase, reason, message[:300] or "Hermes refused the message (%s)." % reason)
 
 
 # --- Face ID (passkey) ---------------------------------------------------------
@@ -1856,7 +2028,7 @@ AUTH_PREFIX = "/phone-api/auth/"
 # Answered here, not by Hermes: no key goes out for them.
 LOCAL_API = (BUSY_PATH, ACTIVE_PATH, DECIDE_PATH, PROFILES_PATH, META_PATH,
              CRON_PATH, CRON_RUNS_PATH, CRON_OUTPUT_PATH, UPLOAD_PATH, MEDIA_PATH,
-             REACTIONS_PATH, REACTIONS_UNSEEN_PATH, SEARCH_PATH) + PUSH_PATHS
+             REACTIONS_PATH, REACTIONS_UNSEEN_PATH, SEARCH_PATH, DESKTOP_SEND_PATH) + PUSH_PATHS
 # Polls that must not keep a Face ID session awake.
 BACKGROUND = (BUSY_PATH, ACTIVE_PATH, PROFILES_PATH, META_PATH)
 RUN_APPROVAL = re.compile(r"^/v1/runs/([A-Za-z0-9_.:-]{1,128})/approval$")
@@ -2062,6 +2234,10 @@ def handle_client(client, upstream_addr=UPSTREAM):
             return
         if local == UPLOAD_PATH and method == "POST":
             serve_upload(client, target, lines, leftover)
+            return
+        if local == DESKTOP_SEND_PATH and method == "POST":
+            # Logged inside: one line, without the text, paths or session.
+            serve_desktop_send(client, target, lines, leftover)
             return
         if local == MEDIA_PATH and method == "GET":
             # Not logged: the query is a file path.

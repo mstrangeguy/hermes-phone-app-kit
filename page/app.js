@@ -199,6 +199,8 @@ const state = {
   sessionId: null,
   profile: "default",
   title: "Hermes",
+  // The open chat's source (desktop, api_server, ...): picks how a message is sent.
+  source: "",
   messages: [],
   hasEarlier: false,
   loadingEarlier: false,
@@ -2312,6 +2314,7 @@ async function openSession(id, title, push, profile) {
   state.sessionId = id;
   state.profile = profile || "default";
   state.title = title || "New session";
+  state.source = listedSource(id, state.profile);
   state.messages = [];
   state.hasEarlier = false;
   OTHER.busy = null;
@@ -2344,6 +2347,7 @@ async function openSession(id, title, push, profile) {
   }
   paintRunChrome();
   watchOther(true);
+  canDesktopSend(state.profile);
   const draft = takeDraft(id);
   if (draft && !$("draft").value) {
     $("draft").value = draft;
@@ -2408,6 +2412,7 @@ async function reloadMessages(opts) {
       const body = await info.json();
       const title = body.session && body.session.title;
       if (body.session) state.flags = { pinned: Boolean(body.session.pinned), archived: Boolean(body.session.archived) };
+      if (body.session && body.session.source) state.source = String(body.session.source);
       if (title) {
         state.title = title;
         $("chat-title").textContent = title;
@@ -2675,7 +2680,8 @@ function renderTranscript(opts) {
 function paintDraftHint() {
   const live = liveRun(state.sessionId);
   const hasUser = state.messages.some(realUser);
-  $("draft").placeholder = live ? "Add guidance while it works"
+  $("draft").placeholder = live && live.via === "gateway" ? "Wait for the reply to send more"
+    : live ? "Add guidance while it works"
     : OTHER.busy ? "Busy in another window"
     : hasUser ? "Send a follow-up" : "Give Hermes a task";
 }
@@ -3137,7 +3143,7 @@ function readyPics() {
 function paintSendState() {
   const run = liveRun(state.sessionId);
   const busy = PICS.items.some((item) => !itemReady(item));
-  $("send").disabled = busy || !($("draft").value.trim() || readyPics().length) || Boolean(run && run.steering);
+  $("send").disabled = busy || !($("draft").value.trim() || readyPics().length) || Boolean(run && (run.steering || run.via === "gateway"));
   $("attach").disabled = Boolean(run);
 }
 
@@ -3353,6 +3359,11 @@ function userNode(run) {
 // with only polling, the run status's last_event is all there is.
 function runPhase(run) {
   if (run.approvals.length) return { label: "Waiting for your approval", since: run.phaseSince, wait: true };
+  if (run.via === "gateway") {
+    // No stream and no run status here: only the lease and the saved rows.
+    const label = !run.admissionId ? "Sending to Hermes…" : run.gatewayState === "working" ? "Working" : "Queued in Hermes";
+    return { label, since: run.phaseSince || run.startedAt };
+  }
   const open = [...run.blocks].reverse().find((b) => b.kind === "tool" && b.state === "running");
   if (open) {
     return { label: "Running " + open.name + (open.summary ? " · " + oneLine(open.summary, 60) : ""), since: open.started };
@@ -3551,6 +3562,11 @@ function sameUserText(text) {
 }
 
 function historyHasUser(run) {
+  // A gateway send is found by row id (Hermes saves its picture lines differently).
+  if (run.via === "gateway") {
+    return state.sessionId === run.sessionId &&
+      PhoneParts.gatewayProgress(state.messages, { text: run.userText, afterRowId: run.rowFloor }).saved;
+  }
   const needle = sameUserText(run.userText);
   let count = 0;
   let last = "";
@@ -3603,8 +3619,10 @@ function paintRunChrome() {
   const run = liveRun(state.sessionId);
   const other = $("other-run");
   // While this session's reply runs, Send becomes "add guidance" (U3) and Stop sits beside it.
-  $("stop").hidden = !run;
-  $("send").setAttribute("aria-label", run ? "Send guidance" : "Send");
+  // Not for a message sent through the gateway: there is no run to steer or stop.
+  const steerable = Boolean(run) && run.via !== "gateway";
+  $("stop").hidden = !steerable;
+  $("send").setAttribute("aria-label", steerable ? "Send guidance" : "Send");
   $("draft").disabled = false;
   paintSendState();
   paintDraftHint();
@@ -4226,6 +4244,14 @@ async function sendMessage(text) {
   paintTray();
   renderTranscript();
   paintRunChrome();
+  // A chat started on a Desktop goes through the gateway when this Hermes can
+  // (v0.22+ refuses it on /v1/runs). Every other chat keeps /v1/runs below.
+  if (PhoneParts.gatewayRoute(await canDesktopSend(run.profile), await chatSource(run.profile, sessionId))) {
+    run.via = "gateway";
+    run.rowFloor = newestRowId(sessionId);
+    paintRunChrome();
+  }
+  const gatewayPics = [];
   let input = text;
   if (picItems.length) {
     // Saved on the Mac first, so the message can carry each path. The message
@@ -4244,6 +4270,9 @@ async function sendMessage(text) {
         const path = await uploadPicture(run.profile, item.blob, item.kind, item.name);
         if (item.kind === "file") {
           fileRefs.push("@file:" + refValue(path));
+        } else if (run.via === "gateway") {
+          // The gateway attaches it from the Mac; the model gets it once.
+          gatewayPics.push(path);
         } else {
           imageRefs.push("@image:" + refValue(path));
           parts.push({ type: "image_url", image_url: { url: await blobToDataUrl(item.blob) } });
@@ -4268,6 +4297,10 @@ async function sendMessage(text) {
   if (state.sessionId === sessionId) {
     PLAN.floor = Math.max(PLAN.floor, PLAN.rowId);
     paintPlan();
+  }
+  if (run.via === "gateway") {
+    await sendViaGateway(run, input, gatewayPics);
+    return;
   }
   let instructions = PHONE_INSTRUCTIONS;
   const notes = await reactionNotes(run.profile, sessionId);
@@ -4313,6 +4346,154 @@ async function sendMessage(text) {
   }
   if (!run.done) run.statusText = REPLYING;
   if (state.sessionId === run.sessionId) renderLive();
+}
+
+// --- Chats started on a Desktop (Hermes v0.22+) -------------------------------
+// Hermes v0.22.5 refuses a phone turn on /v1/runs in a chat whose source is
+// not api_server or bot_room. Those messages go to /phone-api/desktop-send,
+// which queues them through the gateway, the way the Desktop sends. There is
+// no run to stream, stop or steer: the page follows the reply the way it
+// follows a turn started elsewhere, by the turn lease and the saved rows.
+const GATEWAY = { ok: {}, at: {}, every: 300000, rows: 30, stallMs: 120000 };
+
+async function canDesktopSend(profile) {
+  const p = profile || "default";
+  if (GATEWAY.at[p] && Date.now() - GATEWAY.at[p] < GATEWAY.every) return GATEWAY.ok[p] === true;
+  try {
+    const res = await api("/phone-api/meta?profile=" + encodeURIComponent(p));
+    if (res.ok) {
+      const data = await res.json();
+      GATEWAY.ok[p] = data.desktop_send === true;
+      GATEWAY.at[p] = Date.now();
+    }
+  } catch (e) {}
+  return GATEWAY.ok[p] === true;
+}
+
+function listedSource(id, profile) {
+  const p = profile || "default";
+  const row = state.sessions.concat(state.archived || []).find((s) => s && s.id === id && (s._profile || "default") === p);
+  return row && row.source ? String(row.source) : "";
+}
+
+async function chatSource(profile, id) {
+  if (state.sessionId === id && state.source) return state.source;
+  const listed = listedSource(id, profile);
+  if (listed) return listed;
+  try {
+    const res = await api(inProfile(profile, "/api/sessions/" + encodeURIComponent(id)));
+    if (res.ok) {
+      const body = await res.json();
+      return (body.session && body.session.source) || "";
+    }
+  } catch (e) {}
+  return "";
+}
+
+function newestRowId(sessionId) {
+  if (state.sessionId !== sessionId) return 0;
+  return state.messages.reduce((n, m) => (m && Number(m.id) > n ? Number(m.id) : n), 0);
+}
+
+// The Mac may have queued it: never put it back in the box to send again.
+function gatewayLost(run, message) {
+  run.done = true;
+  run.blocks.push({ kind: "note", text: message });
+  run.statusText = "";
+  run.approvals = [];
+  dropRun(run);
+  keepNotes(run);
+  paintRunChrome();
+  if (state.sessionId === run.sessionId) reloadMessages().catch(() => renderTranscript());
+}
+
+async function sendViaGateway(run, text, pictures) {
+  let res;
+  try {
+    res = await api("/phone-api/desktop-send?profile=" + encodeURIComponent(run.profile), {
+      method: "POST",
+      body: JSON.stringify({ session_id: run.sessionId, text, pictures })
+    });
+  } catch (e) {
+    if (e.status === 401) {
+      dropRun(run);
+      paintRunChrome();
+      return showKey(e.message);
+    }
+    gatewayLost(run, "Lost contact with the Mac while sending. Check this chat before sending it again.");
+    return;
+  }
+  let data = {};
+  try { data = await res.clone().json(); } catch (e) {}
+  if (!res.ok || !data.ok) {
+    const error = (data && data.error) || {};
+    const message = error.message || "Hermes refused the message (" + res.status + ").";
+    // Unconfirmed: it may still arrive. Anything else: nothing was queued.
+    if (error.code === "unconfirmed") gatewayLost(run, message);
+    else failStart(run, message);
+    return;
+  }
+  run.admissionId = data.admission_id || "queued";
+  run.statusText = REPLYING;
+  run.phaseSince = Date.now();
+  if (state.sessionId === run.sessionId) renderLive();
+  paintRunChrome();
+  followGateway(run);
+}
+
+async function followGateway(run) {
+  let step = {};
+  while (tracked(run) && !run.done) {
+    const onScreen = state.sessionId === run.sessionId && !$("chat-screen").hidden;
+    await new Promise((resolve) => setTimeout(resolve, onScreen ? 2000 : 5000));
+    if (!tracked(run) || run.done) return;
+    if (document.hidden) continue;
+    let busy;
+    let rows;
+    try {
+      const b = await api("/phone-api/busy?session=" + encodeURIComponent(run.sessionId) +
+        "&profile=" + encodeURIComponent(run.profile));
+      const m = await api(inProfile(run.profile, "/api/sessions/" + encodeURIComponent(run.sessionId) +
+        "/messages?order=latest&limit=" + GATEWAY.rows));
+      if (!b.ok || !m.ok) continue;
+      busy = await b.json();
+      const page = await m.json();
+      rows = Array.isArray(page.data) ? page.data : [];
+    } catch (e) {
+      if (e.status === 401) { showKey(e.message); return; }
+      continue;
+    }
+    if (!tracked(run) || run.done || busy.busy == null) continue;
+    const progress = PhoneParts.gatewayProgress(rows, { text: run.userText, afterRowId: run.rowFloor });
+    step = PhoneParts.gatewayStep(progress, Boolean(busy.busy), step, Date.now(), GATEWAY.stallMs);
+    if (step.state !== run.gatewayState) {
+      run.gatewayState = step.state;
+      run.phaseSince = Date.now();
+    }
+    if (step.state === "done") {
+      finishRun(run, { status: "completed" });
+      return;
+    }
+    if (step.state === "stalled") {
+      gatewayLost(run, "Hermes queued the message but has not started it. The reply will show in this chat when it runs.");
+      return;
+    }
+    if (onScreen && state.sessionId === run.sessionId && !state.loadingEarlier) {
+      try {
+        await reloadMessages({ quiet: true });
+        if (!tracked(run) || run.done) return;
+        pruneSavedBlocks(run);
+      } catch (e) {
+        if (e.status === 401) { showKey(e.message); return; }
+      }
+    }
+    if (state.sessionId === run.sessionId) {
+      renderLive();
+      paintRunChrome();
+    } else if (!$("list-screen").hidden) {
+      paintDots();
+    }
+  }
 }
 
 // U4. Session actions: rename, fork, delete. Fork and delete wait until this

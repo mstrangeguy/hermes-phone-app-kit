@@ -144,8 +144,75 @@
     return showAll ? list.slice() : list.filter((r) => r && (r.pinned || String(r.source || "").toLowerCase() !== "cron"));
   }
 
+  // Chats started on a Desktop, on Hermes v0.22+. Hermes refuses a phone turn
+  // on /v1/runs there unless the chat's source is api_server or bot_room, so
+  // the page sends through the gateway instead (/phone-api/desktop-send). An
+  // unknown source keeps the /v1/runs path.
+  const RUN_SOURCES = ["api_server", "bot_room"];
+
+  function gatewayRoute(canSend, source) {
+    const s = String(source || "").trim().toLowerCase();
+    return canSend === true && s !== "" && RUN_SOURCES.indexOf(s) < 0;
+  }
+
+  function rowText(content) {
+    if (typeof content === "string") return content;
+    if (Array.isArray(content)) {
+      return content.map((p) => typeof p === "string" ? p : (p && typeof p.text === "string" ? p.text : "")).join("\n");
+    }
+    return content && typeof content.text === "string" ? content.text : "";
+  }
+
+  // A user row's words without its picture lines: the gateway saves a picture
+  // as "[Image attached at: <path>]" plus "[screenshot]", the phone as @image:.
+  function coreText(text) {
+    return String(text || "").split("\n").filter((line) => {
+      const t = line.trim();
+      return t !== "[screenshot]" && !/^\[Image attached at: .+\]$/.test(t) && !/^@image:\S/.test(t);
+    }).join("\n").trim();
+  }
+
+  // Where a gateway send stands in the saved rows (newest rows, oldest first):
+  // saved = its own user row is there (newer than afterRowId: the same words,
+  // else the first user row since the send, in case Hermes saved the words
+  // differently); replied = an assistant row with text follows it. When the
+  // reply's steps pushed the user row out of the window, every row shown is
+  // newer than the send, and an assistant row among them counts as saved.
+  function gatewayProgress(rows, sent) {
+    const list = (Array.isArray(rows) ? rows : []).filter((r) => r && typeof r === "object");
+    const floor = Number(sent && sent.afterRowId) || 0;
+    const want = coreText(sent && sent.text);
+    const fresh = list.filter((r) => Number(r.id) > floor);
+    const isUser = (r) => r.role === "user" && !r.display_kind;
+    const said = (r) => r.role === "assistant" && rowText(r.content).trim() !== "";
+    let at = fresh.findIndex((r) => isUser(r) && coreText(rowText(r.content)) === want);
+    if (at < 0) at = fresh.findIndex(isUser);
+    if (at >= 0) return { saved: true, replied: fresh.slice(at + 1).some(said) };
+    const scrolled = list.length > 0 && fresh.length === list.length && !fresh.some(isUser);
+    return { saved: scrolled && fresh.some(said), replied: scrolled && fresh.some(said) };
+  }
+
+  // One look at a gateway send. busy: the chat's turn lease is held. prev:
+  // the last step's {seenBusy, quiet, idleSince} ({} at first). Done once the
+  // lease is gone and the message's row is saved, and either a reply follows,
+  // the lease was seen while it was saved, or 3 looks in a row found no lease.
+  // "stalled": not saved and no lease for stallMs; the gateway still holds it.
+  function gatewayStep(progress, busy, prev, now, stallMs) {
+    const p = prev || {};
+    const seenBusy = Boolean(p.seenBusy || (busy && progress.saved));
+    if (busy) return { state: "working", seenBusy, quiet: 0, idleSince: null };
+    if (progress.saved) {
+      const quiet = (p.quiet || 0) + 1;
+      const done = progress.replied || seenBusy || quiet >= 3;
+      return { state: done ? "done" : "working", seenBusy, quiet, idleSince: null };
+    }
+    const idleSince = p.idleSince || now;
+    return { state: now - idleSince >= (stallMs || 120000) ? "stalled" : "queued", seenBusy, quiet: 0, idleSince };
+  }
+
   root.PhoneParts = {
     TODO_TOOLS, isTodoTool, parseTodos, todoTree, todoProgress, latestTodos, planVisible,
-    QUICK_REACTIONS, applyReaction, mine, tapDetector, searchRows
+    QUICK_REACTIONS, applyReaction, mine, tapDetector, searchRows,
+    gatewayRoute, coreText, gatewayProgress, gatewayStep
   };
 })(typeof window !== "undefined" ? window : globalThis);
