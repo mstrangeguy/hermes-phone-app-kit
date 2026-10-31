@@ -43,7 +43,7 @@ done
 - `bots_test.py` runs `page/lists.js` (main-list, Bots and Cron rules) in node: from `PATH`, `$NODE`, or the copy Hermes keeps beside its checkout (`<Hermes home>/node/bin/node`). Keep list rules in `lists.js`, not `app.js`, so they stay testable.
 - Re-run `plugin_test.py` after every `hermes update`. It drives Hermes's real approval code; set `HERMES_AGENT_DIR` to test another checkout.
 - Any test importing `serve` or `faceid` must point `serve.CONFIG_PATH`, `faceid.CONFIG_PATH` and `faceid.SETUP_PATH` into its scratch folder. Otherwise a live enrolled passkey locks the API-key path and the test fails for the wrong reason. Keep the `FAIL ISOLATION` guard in new tests.
-- `desktopsend_test.py` injects a fake gateway client into `desktop_send.py`, both directly and as a fake `hermes_cli/gateway_client.py` in a scratch agent folder, so the real subprocess path runs. It never talks to a real gateway. Keep page rules for gateway sends in `page/chatparts.js` so node can test them.
+- `desktopsend_test.py` injects a fake gateway client into `desktop_send.py`, both directly and as a fake `hermes_cli/gateway_client.py` in a scratch agent folder, so the real subprocess path runs. Its "old Hermes" folder holds a `gateway_client.py` that raises `ModuleNotFoundError`: on v0.22 Hermes's editable-install finder would otherwise import the real client when the file is merely absent. It never talks to a real gateway. Keep page rules for gateway sends in `page/chatparts.js` so node can test them.
 - Never test alerts by starting a real run. `alerts_test.py` uses fake Home Assistant and Telegram servers. To check the real channel once: `serve.py --notify "test"`.
 
 ## Troubleshooting

@@ -235,11 +235,22 @@ class _Client:
 async def connect_gateway(endpoint=None, subject=None):
     yield _Client()
 '''
+# An old Hermes (before v0.22) has no hermes_cli/gateway_client.py. Leaving the
+# file out of the fake folder is not enough on v0.22: its managed install adds
+# setuptools' editable finder to sys.meta_path, which resolves
+# hermes_cli.gateway_client in Hermes's own workspace when the fake package
+# lacks it, so the real client imports. A fake module that fails to import is
+# found first (the normal path finder runs before that finder) on every version.
+OLD_CLIENT = r'''
+raise ModuleNotFoundError("No module named 'hermes_cli.gateway_client'", name="hermes_cli.gateway_client")
+'''
 agent_none = os.path.join(work, "agent-old")
 agent_new = os.path.join(work, "agent-new")
 os.makedirs(os.path.join(agent_none, "hermes_cli"), exist_ok=True)
 with open(os.path.join(agent_none, "hermes_cli", "__init__.py"), "w") as handle:
     handle.write("")
+with open(os.path.join(agent_none, "hermes_cli", "gateway_client.py"), "w") as handle:
+    handle.write(OLD_CLIENT)
 os.makedirs(os.path.join(agent_new, "hermes_cli"), exist_ok=True)
 with open(os.path.join(agent_new, "hermes_cli", "__init__.py"), "w") as handle:
     handle.write("")
@@ -385,8 +396,10 @@ open(gw_log, "w").close()
 status, up2 = call("/phone-api/upload", "POST", raw=PNG, ctype="image/png")
 status, body = call(SEND, "POST", {"session_id": "chat1", "text": "look", "pictures": [up2["path"]]})
 calls = [json.loads(line) for line in open(gw_log) if line.strip()]
+# The proxy resolves picture paths (realpath) before sending; a scratch folder
+# under /var or /tmp on macOS resolves to /private/...
 check("config desktop_image_refs: @image: line added", status == 202 and calls and
-      calls[-1]["params"]["text"] == "look\n@image:" + up2["path"])
+      calls[-1]["params"]["text"] == "look\n@image:" + os.path.realpath(up2["path"]))
 os.remove(serve.CONFIG_PATH)
 
 # The log: one line per send, nothing secret.
