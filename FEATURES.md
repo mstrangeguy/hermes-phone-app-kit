@@ -16,6 +16,10 @@ Store app and no cloud service. Setup and settings: [README.md](README.md).
   Hermes sends back show in the chat with pinch-to-zoom.
 - **Task list card.** When Hermes keeps a task list, a card above the message box shows progress
   (for example "3/7") and the current step; tap it for the whole list.
+  The headline is a weighted % (steps Hermes marks as bigger count more) with the step count
+  beside it, over a bar with one segment per step. It turns red with Stopped or Failed when a
+  reply started on the phone ends early, yellow with Waiting on you when Hermes is waiting for
+  your answer, green when done.
 - **"Files changed" card** for each reply that edited files, like the desktop's.
 - **One-tap answers.** When Hermes asks a plain yes/no question, **Yes, go ahead** and **Not
   now** buttons appear. Never shown for locks, the alarm, the thermostat, the garage, a siren or

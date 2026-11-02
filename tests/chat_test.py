@@ -336,6 +336,27 @@ ok("progress: cancelled leaves the total", prog.done === 1 && prog.total === 4 &
 ok("progress: current is the in-progress item", prog.current && prog.current.id === "b");
 ok("progress: empty", P.todoProgress([]).total === 0 && P.todoProgress(null).current === null);
 
+// Weighted progress: weight 1-100 (unset = 1), waiting only on the in-progress step.
+const job = (done, cur, w) => (w || [2, 20, 1, 1, 1, 1, 1, 1]).map((weight, i) => ({ id: "s" + i, content: "step " + i,
+  status: i < done ? "completed" : i === cur ? "in_progress" : "pending", weight }));
+const wparsed = P.parseTodos([{ id: "a", content: "A", status: "in_progress", weight: 20, waiting: true },
+  { id: "b", content: "B", status: "pending", weight: "3", waiting: true }, { id: "c", content: "C", status: "pending", weight: 500 },
+  { id: "d", content: "D", status: "pending", weight: "x" }]);
+ok("weights: parsed, clamped, waiting only in progress", J(wparsed) === J([
+  { id: "a", content: "A", status: "in_progress", weight: 20, waiting: true }, { id: "b", content: "B", status: "pending", weight: 3 },
+  { id: "c", content: "C", status: "pending", weight: 100 }, { id: "d", content: "D", status: "pending" }]));
+ok("weights: the mockup's percentages", [P.todoProgress(job(1, 1)).percent, P.todoProgress(job(2, 2)).percent,
+  P.todoProgress(job(3, 3)).percent, P.todoProgress(job(3, 3, [2, 20, 1, 6, 1, 1, 1, 1])).percent,
+  P.todoProgress(job(8, -1)).percent].join() === "7,79,82,70,100");
+ok("weights: none set counts tasks", P.todoProgress(list).percent === 25);
+const wjob = job(2, 2); wjob[2].waiting = true;
+ok("tone: running, idle, red, yellow, green", P.todoTone(job(2, 2), null, true) === "running" &&
+  P.todoTone(job(2, 2), null, false) === "idle" && P.todoTone(job(2, 2), "stopped", false) === "stopped" &&
+  P.todoTone(job(2, 2), "failed", false) === "failed" && P.todoTone(wjob, null, true) === "waiting" &&
+  P.todoTone(job(8, -1), "stopped", false) === "done");
+ok("tone: run endings", P.runOutcome("run.failed") === "failed" && P.runOutcome("run.cancelled") === "stopped" &&
+  P.runOutcome("run.interrupted") === "stopped" && P.runOutcome("run.completed") === null);
+
 const rows = [
   { id: 10, role: "tool", tool_name: "todo_list", content: J({ todos: [list[0]] }) },
   { id: 11, role: "assistant", content: "x" },

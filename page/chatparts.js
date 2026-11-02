@@ -32,6 +32,12 @@
         if (!id || !content) continue;
         const row = { id, content, status: item.status };
         if (parent && parent !== id) row.parent = parent;
+        // Weighted progress (Hermes core patch): relative effort 1-100, and a
+        // flag for an in-progress step that waits on you.
+        const weight = typeof item.weight === "number" ? item.weight
+          : typeof item.weight === "string" && item.weight.trim() ? Number(item.weight) : NaN;
+        if (isFinite(weight)) row.weight = Math.max(1, Math.min(100, Math.round(weight)));
+        if (item.waiting === true && item.status === "in_progress") row.waiting = true;
         out.push(row);
       }
       return out;
@@ -70,14 +76,48 @@
     return out;
   }
 
-  // {done, total, open, current}: done counts completed; cancelled items
-  // leave the total (they are not left to do); current is the in-progress item.
+  // An item's share of the job for the bar: its weight, 1 when unset.
+  function todoWeight(t) {
+    const w = Number(t && t.weight);
+    return isFinite(w) && w >= 1 ? Math.min(100, Math.round(w)) : 1;
+  }
+
+  // {done, total, open, current, percent}: done counts completed; cancelled
+  // items leave the total (they are not left to do); current is the
+  // in-progress item; percent is completed weight over all counted weight.
   function todoProgress(todos) {
     const list = Array.isArray(todos) ? todos : [];
     const counted = list.filter((t) => t.status !== "cancelled");
     const done = counted.filter((t) => t.status === "completed").length;
     const current = list.find((t) => t.status === "in_progress") || null;
-    return { done, total: counted.length, open: counted.length - done, current };
+    let all = 0;
+    let finished = 0;
+    for (const t of counted) {
+      all += todoWeight(t);
+      if (t.status === "completed") finished += todoWeight(t);
+    }
+    const percent = all ? Math.round(100 * finished / all) : 0;
+    return { done, total: counted.length, open: counted.length - done, current, percent };
+  }
+
+  // The card's colour: "done" (green), "failed"/"stopped" (red, from how the
+  // reply ended), "waiting" (yellow, the step waits on you), else "running"
+  // while a reply works or "idle".
+  function todoTone(todos, outcome, working) {
+    const prog = todoProgress(todos);
+    if (prog.total > 0 && prog.open === 0) return "done";
+    if (outcome === "failed" || outcome === "stopped") return outcome;
+    if (prog.current && prog.current.waiting) return "waiting";
+    return working ? "running" : "idle";
+  }
+
+  // How a phone-run ending maps to the card: failed is red Failed; a Stop or
+  // an interruption is red Stopped; a finished reply clears it.
+  function runOutcome(eventName) {
+    const name = String(eventName || "");
+    if (name.indexOf("failed") >= 0) return "failed";
+    if (name.indexOf("cancelled") >= 0 || name.indexOf("interrupted") >= 0) return "stopped";
+    return null;
   }
 
   // The newest task list in a transcript page: {todos, rowId} or null.
@@ -247,7 +287,8 @@
   }
 
   root.PhoneParts = {
-    TODO_TOOLS, isTodoTool, parseTodos, todoTree, todoProgress, latestTodos, planVisible,
+    TODO_TOOLS, isTodoTool, parseTodos, todoTree, todoProgress, todoWeight, todoTone, runOutcome,
+    latestTodos, planVisible,
     QUICK_REACTIONS, applyReaction, mine, tapDetector, searchRows,
     gatewayRoute, coreText, gatewayProgress, gatewayStep,
     QUICK_ANSWERS, quickReplies

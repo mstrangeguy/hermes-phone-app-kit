@@ -4367,6 +4367,9 @@ function finishRun(run, event) {
   run.done = true;
   saveRuns();
   const name = event.event || event.status || "";
+  const outcome = PhoneParts.runOutcome(name);
+  if (outcome) PLAN_OUTCOME[run.sessionId] = outcome;
+  else delete PLAN_OUTCOME[run.sessionId];
   // The final answer is also relayed as the last step's text; drop that copy.
   const output = String(event.output || "").trim();
   const last = run.blocks[run.blocks.length - 1];
@@ -5317,6 +5320,9 @@ document.addEventListener("pointerdown", (event) => {
 // It shows while a reply runs (here or on the desktop), then stays, folded,
 // for that turn's list until you close it or send the next message.
 const PLAN = { sessionId: null, todos: null, rowId: 0, floor: 0, open: false, sig: "", timer: 0 };
+// How the last phone-started reply ended, per session ("failed" / "stopped"),
+// for the card's red state. A new task-list write clears it.
+const PLAN_OUTCOME = {};
 const PLAN_CLOSED = "hermes.phone.planClosed";
 
 function planClosedSet() {
@@ -5350,6 +5356,7 @@ function updatePlanFromMessages() {
 
 // A todo step finished in a reply on screen: read the newest rows for the list.
 function refreshPlanSoon(run, preview) {
+  if (run) delete PLAN_OUTCOME[run.sessionId];
   if (!run || run.sessionId !== state.sessionId) return;
   const quick = PhoneParts.parseTodos(preview || "");
   if (quick && quick.length) {
@@ -5385,7 +5392,7 @@ function todoMark(status) {
   return { completed: "\u2713", cancelled: "\u2298", in_progress: "\u25d0", pending: "\u25cb" }[status] || "\u25cb";
 }
 
-function todoListNode(todos) {
+function todoListNode(todos, tone) {
   const list = document.createElement("ul");
   list.className = "todo-list";
   for (const [todo, depth] of PhoneParts.todoTree(todos)) {
@@ -5395,7 +5402,10 @@ function todoListNode(todos) {
     const mark = document.createElement("span");
     mark.className = "todo-mark";
     mark.setAttribute("aria-hidden", "true");
-    mark.textContent = todoMark(todo.status);
+    // The step the list stopped on (red ✕) or waits on you for (yellow ‖).
+    const halted = todo.status === "in_progress" && (tone === "failed" || tone === "stopped" || tone === "waiting");
+    if (halted) item.classList.add("halt-" + tone);
+    mark.textContent = halted ? (tone === "waiting" ? "\u2016" : "\u2715") : todoMark(todo.status);
     const text = document.createElement("span");
     text.className = "todo-text";
     text.textContent = todo.content;
@@ -5414,7 +5424,8 @@ function paintPlan() {
   const dismissed = planClosedSet().has(key);
   const visible = PLAN.sessionId === state.sessionId &&
     PhoneParts.planVisible(PLAN, { working, dismissed, lastUserRowId: lastUserRowId(), floorRowId: PLAN.floor });
-  const sig = visible ? JSON.stringify([PLAN.todos, PLAN.open, working]) : "";
+  const outcome = PLAN_OUTCOME[state.sessionId] || null;
+  const sig = visible ? JSON.stringify([PLAN.todos, PLAN.open, working, outcome]) : "";
   if (sig === PLAN.sig && box.hidden === !visible) return;
   PLAN.sig = sig;
   box.hidden = !visible;
@@ -5422,8 +5433,10 @@ function paintPlan() {
   if (!visible) return;
   const prog = PhoneParts.todoProgress(PLAN.todos);
   const finished = prog.total > 0 && prog.open === 0;
+  const tone = PhoneParts.todoTone(PLAN.todos, outcome, working);
   box.classList.toggle("done", finished);
   box.classList.toggle("open", PLAN.open);
+  for (const t of ["failed", "stopped", "waiting"]) box.classList.toggle("tone-" + t, tone === t);
   const head = document.createElement("button");
   head.type = "button";
   head.className = "plan-head";
@@ -5432,28 +5445,42 @@ function paintPlan() {
   icon.className = "plan-ico";
   icon.setAttribute("aria-hidden", "true");
   icon.textContent = "\u2611";
+  // Weighted %, with the step count beside it.
   const count = document.createElement("span");
   count.className = "plan-count";
-  count.textContent = prog.done + "/" + prog.total;
+  count.textContent = prog.percent + "%";
+  const sub = document.createElement("span");
+  sub.className = "plan-sub";
+  sub.textContent = prog.done + "/" + prog.total;
+  count.append(sub);
   const now = document.createElement("span");
   now.className = "plan-now";
-  now.textContent = finished ? "All done" : prog.current ? prog.current.content : (prog.open + " to go");
+  const tag = { failed: "Failed", stopped: "Stopped", waiting: "Waiting on you" }[tone];
+  const step = prog.current ? prog.current.content : (prog.open + " to go");
+  now.textContent = finished ? "All done" : tag ? tag + " \u00b7 " + step : step;
   const chev = document.createElement("span");
   chev.className = "chev";
   chev.setAttribute("aria-hidden", "true");
   chev.textContent = "\u203a";
   head.append(icon, count, now, chev);
-  head.setAttribute("aria-label", "Tasks: " + prog.done + " of " + prog.total + " done" + (prog.current ? ", now: " + prog.current.content : ""));
+  head.setAttribute("aria-label", "Tasks: " + prog.percent + " percent, " + prog.done + " of " + prog.total + " done" +
+    (tag ? ", " + tag : "") + (prog.current ? ", now: " + prog.current.content : ""));
   head.addEventListener("click", () => {
     PLAN.open = !PLAN.open;
     paintPlan();
   });
+  // One segment per step, as wide as its weight: done solid, running striped,
+  // the step it stopped or waits on outlined, the rest grey.
   const bar = document.createElement("div");
   bar.className = "plan-bar";
-  const fill = document.createElement("div");
-  fill.className = "plan-fill";
-  fill.style.width = (prog.total ? Math.round(100 * prog.done / prog.total) : 0) + "%";
-  bar.append(fill);
+  for (const [todo] of PhoneParts.todoTree(PLAN.todos)) {
+    if (todo.status === "cancelled") continue;
+    const seg = document.createElement("span");
+    seg.className = "plan-seg " + todo.status;
+    if (todo.status === "in_progress" && (tone === "failed" || tone === "stopped" || tone === "waiting")) seg.classList.add("halt");
+    seg.style.flexGrow = String(PhoneParts.todoWeight(todo));
+    bar.append(seg);
+  }
   const top = document.createElement("div");
   top.className = "plan-top";
   top.append(head);
@@ -5475,7 +5502,7 @@ function paintPlan() {
   if (PLAN.open) {
     const body = document.createElement("div");
     body.className = "plan-body";
-    body.append(todoListNode(PLAN.todos));
+    body.append(todoListNode(PLAN.todos, tone));
     box.append(body);
   }
 }
