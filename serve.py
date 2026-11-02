@@ -2708,6 +2708,37 @@ def serve():
         server.server_close()
 
 
+NOTIFY_LINK = re.compile(r"^#[A-Za-z0-9_\-/=&.%]{0,200}$")
+
+
+def notify_args(args):
+    """(text, title, link, urgent) from --notify's arguments. Raises ValueError."""
+    text, title, link, urgent = None, "", "", False
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--urgent":
+            urgent = True
+        elif arg in ("--title", "--link"):
+            if i + 1 >= len(args):
+                raise ValueError("%s needs a value" % arg)
+            i += 1
+            if arg == "--title":
+                title = args[i][:120]
+            else:
+                if not NOTIFY_LINK.match(args[i]):
+                    raise ValueError("--link must be an in-app #hash")
+                link = args[i]
+        elif text is None:
+            text = arg
+        else:
+            raise ValueError("unexpected argument")
+        i += 1
+    if not text or not text.strip():
+        raise ValueError("no text")
+    return text[:400], title, link, urgent
+
+
 def main(argv):
     if argv[:1] == ["--faceid-config"] and len(argv) == 3:
         faceid.configure(argv[1], argv[2])
@@ -2716,13 +2747,21 @@ def main(argv):
     if argv[:1] == ["--setup-code"]:
         print("Setup code (10 minutes): %s" % faceid.new_setup_code())
         return
-    if argv[:1] == ["--notify"] and len(argv) == 2:
-        # One alert through the configured channel (install test, update check).
+    if argv[:1] == ["--notify"] and len(argv) >= 2:
+        # One alert through the configured channel (install test, update check,
+        # or another local monitor using this app's channel as its own backup).
+        #   --notify TEXT [--title TITLE] [--urgent] [--link #hash]
+        try:
+            text, title, link, urgent = notify_args(argv[1:])
+        except ValueError as exc:
+            print("usage: serve.py --notify TEXT [--title TITLE] [--urgent] [--link #hash] (%s)" % exc)
+            sys.exit(2)
         config = alert_config()
         if config is None:
             print("alerts are off (no valid \"alerts\" block in config.json)")
             sys.exit(2)
-        ok = send_alert(config, argv[1], False)
+        push = {"title": title or APP_NAME, "body": text, "link": link}
+        ok = send_alert(config, ("%s: %s" % (title, text)) if title else text, urgent, push)
         print("alert sent via %s" % config["channel"] if ok else "alert failed, see the line above")
         sys.exit(0 if ok else 1)
     foreground = "--foreground" in argv

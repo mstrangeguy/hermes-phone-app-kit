@@ -72,7 +72,9 @@ EXEC_SCHEMA = """CREATE TABLE executions (id TEXT PRIMARY KEY, job_id TEXT NOT N
 
 
 def iso(ts):
-    return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(ts)) + time.strftime("%z")[:3] + ":" + time.strftime("%z")[3:]
+    # The offset of ts itself, not of now: the two differ across a DST change.
+    z = time.strftime("%z", time.localtime(ts))
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(ts)) + z[:3] + ":" + z[3:]
 
 
 def fname(ts):

@@ -195,6 +195,26 @@ check("HA down: backoff set", serve.backing_off())
 serve._last_fail[0] = None
 check("fresh process: no backoff", not serve.backing_off())
 
+# --notify arguments (update check, and local monitors that use this channel as a backup).
+check("--notify plain text", serve.notify_args(["hello"]) == ("hello", "", "", False))
+check("--notify title, urgent, link",
+      serve.notify_args(["body", "--title", "House: down", "--urgent", "--link", "#s=abc&p=ops"])
+      == ("body", "House: down", "#s=abc&p=ops", True))
+
+
+def bad_notify(args):
+    try:
+        serve.notify_args(args)
+    except ValueError:
+        return True
+    return False
+
+
+check("--notify refuses an outside link", bad_notify(["x", "--link", "https://evil.example/"]))
+check("--notify refuses no text", bad_notify(["--urgent"]) and bad_notify(["  "]))
+check("--notify refuses a stray argument", bad_notify(["a", "b"]) and bad_notify(["a", "--title"]))
+check("--notify clips long text", len(serve.notify_args(["x" * 900])[0]) == 400)
+
 log = open(serve.LOG_PATH).read() if os.path.exists(serve.LOG_PATH) else ""
 check("tokens never logged", "fake-token" not in log and "fake-bot-token" not in log)
 
