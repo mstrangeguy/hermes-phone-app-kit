@@ -29,6 +29,7 @@ Run Python for this app with `scripts/py`, never a hardcoded interpreter path. I
 - Restart the proxy with `launchctl kickstart -k gui/$(id -u)/com.hermes.phone-chat`, never by running `serve.py` by hand: that would fight launchd for the port. If the session you are in came through the phone page, a restart cuts it. Do proxy work from the CLI, the desktop app or Telegram.
 - Editing a `page/` file takes effect on the next page load. Editing `serve.py`, `faceid.py` or `webpush.py` needs a restart. The `alerts` block of `config.json` is re-read every 3 seconds.
 - `hermes plugins enable/disable phone-approvals` only with the desktop app quit: enabling while it runs makes the backend rediscover every plugin mid-turn.
+- A change a user would notice (new, changed or removed) updates `FEATURES.md` in the same commit, in plain words: what you get, not how.
 
 ## Tests
 

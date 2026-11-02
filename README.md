@@ -2,6 +2,8 @@
 
 A phone chat app for your own Hermes agent. It uses the same sessions as the Hermes desktop app, CLI and Telegram. You can read and continue any session, watch a reply's tool steps live, guide a running reply, stop it, answer approval prompts with Face ID, and get an alert when Hermes needs you or finishes.
 
+Everything the app does, in one list: [FEATURES.md](FEATURES.md).
+
 It runs on the Mac that runs Hermes and is reachable only over your Tailscale tailnet. It is a web page added to the iPhone Home Screen. There is no App Store app and no cloud service.
 
 ## What you need
@@ -183,5 +185,6 @@ scripts/py -I tests/plugin_test.py "$PWD" "$(mktemp -d)"
 | `scripts/` | `py` (finds Hermes's Python), installer helpers, the update check. |
 | `tests/` | Offline tests. None of them contacts a real phone, bot, push service or Home Assistant. |
 | `skill/SKILL.md` | Instructions for your Hermes agent to maintain this app. |
+| `FEATURES.md` | What the app does, in plain words. |
 
 This app is MIT licensed (see `LICENSE`). Third-party code: marked (MIT) and DOMPurify (Apache-2.0 / MPL-2.0), licences in `page/vendor/`. The icon is Hermes's own (MIT), licence in `page/icon-LICENSE`.
