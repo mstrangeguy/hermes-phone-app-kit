@@ -15,6 +15,7 @@ import subprocess
 import sys
 
 repo, work = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
+os.makedirs(work, exist_ok=True)
 results = []
 
 
