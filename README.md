@@ -54,6 +54,7 @@ Not on the phone (desktop only): Bot Mode group chats and rooms, bot avatars, cr
 
 In a chat:
 
+- **Refresh.** Pull down at the top of Sessions, Status, Bots or Cron jobs to reload it. A chat started on the desktop or in a terminal appears in Sessions within about 5 seconds of its first reply starting.
 - **Search.** The box above the Sessions list searches chat titles and message text across every chat in the profiles in view, not just the loaded ones. Results replace the list until you clear the box.
 - **Reactions.** Double-tap a message for the six Tapbacks (❤️ 👍 👎 😂 ‼️ ❓). Tap your own reaction to take it back. They are the desktop app's reactions, kept in Hermes, so both apps show them, and Hermes's own reactions appear too. Your reactions are passed to the agent with your next message, as the desktop does. They follow the desktop setting Settings → Appearance → message reactions (`display.message_reactions` in that profile's `config.yaml`); with it off, the phone hides them. The agent cannot react to a message sent from the phone yet: on the API server, Hermes looks the message up under the run, not the chat.
 - **Task list.** When the agent keeps a task list, a card above the message box shows progress ("3/7") and the step in hand; tap it for the whole list. It shows while a reply runs, here or on the desktop, and stays after for that turn until you close it. Task-list steps in the chat read as progress and open as a checklist.
@@ -73,6 +74,8 @@ If the page does not load with iCloud Private Relay on, add this to the tailnet 
 ```
 
 ## Phone approvals (optional)
+
+The plugin also brings the desktop's question cards to the phone (Hermes's clarify tool: one to five questions, with choices or free text). The card shows in that chat above the message box: tap a choice (several, where the question allows it), or type an Other answer, then Send. A question you leave blank is sent as skipped, and one already answered on the desktop keeps that answer. Once the phone's answers end the wait, the desktop's card closes. An unanswered question alerts the phone after 45 seconds, like a desktop approval.
 
 Without the plugin, the phone answers approval prompts for replies it started. With it, the phone also answers prompts raised in the desktop app or on Telegram. A prompt in a terminal `hermes` chat is answered only in that terminal. Only Allow once and Deny are offered.
 

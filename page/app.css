@@ -209,6 +209,12 @@ input[type="password"]:focus, input.code:focus, textarea:focus { border-color: v
   -webkit-overflow-scrolling: touch;
 }
 .list { overscroll-behavior-y: contain; }
+.pull-tip { height: 0; overflow: hidden; display: flex; align-items: center; justify-content: center; gap: 8px;
+  background: var(--sidebar); color: var(--muted-fg); font-size: 13px; flex: none; transition: height 0.15s ease-out; }
+.pull-spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--border);
+  border-top-color: var(--primary); flex: none; }
+.pull-tip.busy .pull-spin, .icon.spinning svg { animation: spin 0.8s linear infinite; }
+.status-when { color: var(--muted-fg); font-size: 12px; text-align: center; padding: 10px 8px 4px; }
 .msg { margin: 0 0 16px; max-width: 100%; }
 .msg.user { display: block; }
 .bubble {
@@ -381,6 +387,14 @@ html.kb .composer { padding-bottom: 8px; }
 .choices { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 .choices .textbtn { flex: 1; }
 .choices .textbtn.armed { background: var(--warn); color: var(--bg); }
+.approval.clarify { border-color: var(--border); }
+.clarify-q { margin: 0 0 10px; }
+.clarify-choices { display: flex; flex-direction: column; gap: 6px; margin: 4px 0 6px; }
+.clarify-choices .textbtn { text-align: left; justify-content: flex-start; min-height: 40px;
+  border: 1px solid var(--border); background: var(--muted); white-space: normal; }
+.clarify-choices .textbtn.picked { background: var(--primary); color: var(--primary-fg); border-color: transparent; }
+.clarify-other { width: 100%; box-sizing: border-box; font: inherit; font-size: 16px; color: var(--fg);
+  background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; resize: vertical; }
 .deny { color: var(--danger); }
 .err { color: var(--danger); font-size: 14px; margin-top: 8px; }
 .more {

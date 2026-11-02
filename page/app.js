@@ -984,7 +984,7 @@ function listError(e) {
 // approval, accent = working, green = finished since you last opened it.
 // The proxy's /phone-api/active lists every session with a live turn (any
 // window); approvals are known only for replies started on this page.
-const ACTIVE = { map: {}, read: {}, timer: 0, checking: false, every: 5000 };
+const ACTIVE = { map: {}, read: {}, timer: 0, checking: false, every: 5000, seen: new Set() };
 // Read-state writes in flight (id), so a poll does not send the same PATCH twice.
 const READS = { pending: new Set() };
 const UNREAD_NAME = "hermes.phone.unread";
@@ -1074,8 +1074,19 @@ async function checkActive() {
     }
     if (ended) saveUnread(set);
     refreshBadge();
+    // A chat started elsewhere (the desktop, a terminal) shows up as soon as
+    // its first turn runs, not when that turn ends. Each unseen id reloads
+    // the list once: some live ids (a compressed chat's older half, hidden
+    // chats) never appear in the list, and must not reload it every poll.
+    const listed = new Set(state.sessions.map((s) => s.id));
+    let fresh = false;
+    for (const id of Object.keys(data.active)) {
+      if (ACTIVE.seen.has(id)) continue;
+      ACTIVE.seen.add(id);
+      if (!listed.has(id)) fresh = true;
+    }
     if (!$("list-screen").hidden) {
-      if (ended) await loadSessions(true).catch(() => renderSessions());
+      if (ended || fresh) await loadSessions(true).catch(() => renderSessions());
       else paintDots();
     }
     if (!$("bots-screen").hidden) paintBotDots();
@@ -1523,6 +1534,7 @@ async function loadStatus() {
     STATUS.updated = typeof data.updated === "string" ? data.updated : "";
     STATUS.stale = data.stale === true;
     STATUS.note = data.enabled === false ? "The Status screen is turned off on the Mac." : "";
+    STATUS.refreshedAt = Date.now();
   } catch (e) {
     if (e.status === 401) return showKey(e.message);
     if (seq !== STATUS.seq) return;
@@ -1530,6 +1542,27 @@ async function loadStatus() {
   }
   STATUS.loaded = true;
   if (!$("status-screen").hidden) renderStatus();
+}
+
+// The refresh button spins for at least half a second, so a fast answer still
+// shows that something happened.
+async function refreshStatus() {
+  const button = $("status-refresh");
+  if (button.classList.contains("spinning")) return;
+  button.classList.add("spinning");
+  button.disabled = true;
+  const started = Date.now();
+  try {
+    await loadStatus();
+  } finally {
+    await new Promise((r) => setTimeout(r, Math.max(0, 500 - (Date.now() - started))));
+    button.classList.remove("spinning");
+    button.disabled = false;
+  }
+}
+
+function clockTime(ms) {
+  return new Date(ms).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
 }
 
 function statusCard(card) {
@@ -1593,6 +1626,14 @@ function renderStatus() {
     root.append(empty);
   }
   for (const card of STATUS.cards) root.append(statusCard(card));
+  if (STATUS.refreshedAt) {
+    const when = document.createElement("div");
+    when.className = "status-when";
+    const data = stampOf(STATUS.updated);
+    when.textContent = "Refreshed " + clockTime(STATUS.refreshedAt) +
+      (data && !STATUS.stale ? " · monitor data from " + clockTime(data) : "");
+    root.append(when);
+  }
   root.scrollTop = scroll;
 }
 
@@ -3832,7 +3873,7 @@ function setDesktopApprovals(list) {
   // page's own state (armed, sent, error) survive each poll.
   DESKTOP.list = list.map((a) => {
     const old = keep.get(a.request_id);
-    return old ? Object.assign(old, a, pick(old, ["armed", "sent", "error"])) : a;
+    return old ? Object.assign(old, a, pick(old, ["armed", "sent", "error", "picks", "other", "picksVersion"])) : a;
   });
   const sig = JSON.stringify(desktopApprovalsHere().map((a) => a.request_id));
   if (sig === DESKTOP.sig) return;
@@ -3857,7 +3898,179 @@ function renderApprovals() {
   if (run) {
     for (const approval of run.approvals) root.append(approvalCard(run, approval));
   }
-  for (const approval of desktopApprovalsHere()) root.append(approvalCard(null, approval));
+  const here = desktopApprovalsHere();
+  for (const approval of here) if (approval.kind !== "clarify") root.append(approvalCard(null, approval));
+  paintQuestions(here.filter((a) => a.kind === "clarify"));
+}
+
+// Questions Hermes asked in a desktop chat (the clarify card), answered here.
+// Rebuilt only when the questions or their state change, because live
+// updates repaint the approvals often and would wipe a half-typed answer.
+const QUESTIONS = { sig: "" };
+
+function questionsBox() {
+  let box = $("questions");
+  if (!box) {
+    box = document.createElement("div");
+    box.id = "questions";
+    $("approvals").insertAdjacentElement("afterend", box);
+  }
+  return box;
+}
+
+function paintQuestions(list, force) {
+  const box = questionsBox();
+  const sig = JSON.stringify(list.map((q) => [q.request_id, q.sent, q.error,
+    q.questions.map((x) => [x.qid, x.answered]), q.picksVersion || 0]));
+  if (!force && sig === QUESTIONS.sig) return;
+  QUESTIONS.sig = sig;
+  box.textContent = "";
+  for (const item of list) box.append(questionCard(item));
+}
+
+function repaintQuestions() {
+  paintQuestions(desktopApprovalsHere().filter((a) => a.kind === "clarify"), true);
+}
+
+function questionCard(item) {
+  item.picks = item.picks || {};
+  item.other = item.other || {};
+  const card = document.createElement("div");
+  card.className = "approval clarify";
+  const open = item.questions.filter((q) => !q.answered);
+  const title = document.createElement("h3");
+  title.textContent = open.length > 1 ? "Hermes has " + open.length + " questions" : "Hermes has a question";
+  card.append(title);
+  if (item.sent) {
+    const note = document.createElement("div");
+    note.className = "meta";
+    note.textContent = "Sent. Waiting for Hermes to pick it up…";
+    card.append(note);
+    return card;
+  }
+  for (const q of open) card.append(questionBlock(item, q));
+  const choices = document.createElement("div");
+  choices.className = "choices";
+  const send = document.createElement("button");
+  send.type = "button";
+  send.className = "textbtn primary";
+  send.textContent = open.length > 1 ? "Send answers" : "Send answer";
+  send.disabled = !open.some((q) => answerOf(item, q) != null);
+  item.sendButton = send;
+  send.addEventListener("click", () => answerQuestions(item, send));
+  choices.append(send);
+  card.append(choices);
+  if (open.length > 1) {
+    const note = document.createElement("div");
+    note.className = "meta";
+    note.textContent = "Questions left blank are sent as skipped.";
+    card.append(note);
+  }
+  if (item.error) {
+    const err = document.createElement("div");
+    err.className = "err";
+    err.textContent = item.error;
+    card.append(err);
+  }
+  return card;
+}
+
+function questionBlock(item, q) {
+  const block = document.createElement("div");
+  block.className = "clarify-q";
+  const text = document.createElement("div");
+  text.className = "desc";
+  text.textContent = q.question;
+  block.append(text);
+  const picked = item.picks[q.qid];
+  if (q.choices && q.choices.length) {
+    const row = document.createElement("div");
+    row.className = "clarify-choices";
+    q.choices.forEach((choice, i) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      const on = q.multi_select ? Array.isArray(picked) && picked.includes(choice) : picked === choice;
+      button.className = "textbtn" + (on ? " picked" : "");
+      button.setAttribute("aria-pressed", on ? "true" : "false");
+      button.textContent = choice + (q.recommended === i ? " · Recommended" : "");
+      button.addEventListener("click", () => {
+        if (q.multi_select) {
+          const set = Array.isArray(item.picks[q.qid]) ? item.picks[q.qid].slice() : [];
+          const at = set.indexOf(choice);
+          if (at >= 0) set.splice(at, 1); else set.push(choice);
+          item.picks[q.qid] = set;
+        } else {
+          item.picks[q.qid] = item.picks[q.qid] === choice ? undefined : choice;
+          if (item.picks[q.qid]) item.other[q.qid] = "";
+        }
+        item.picksVersion = (item.picksVersion || 0) + 1;
+        repaintQuestions();
+      });
+      row.append(button);
+    });
+    block.append(row);
+  }
+  const input = document.createElement("textarea");
+  input.className = "clarify-other";
+  input.rows = 1;
+  input.maxLength = 2000;
+  input.placeholder = q.choices && q.choices.length ? "Other answer (optional)" : "Your answer";
+  input.value = item.other[q.qid] || "";
+  input.addEventListener("input", () => {
+    item.other[q.qid] = input.value;
+    if (input.value.trim() && !q.multi_select && item.picks[q.qid]) {
+      item.picks[q.qid] = undefined;  // typing replaces a single pick
+      for (const b of block.querySelectorAll(".clarify-choices .textbtn")) {
+        b.classList.remove("picked");
+        b.setAttribute("aria-pressed", "false");
+      }
+    }
+    if (item.sendButton) item.sendButton.disabled = !item.questions.some((x) => !x.answered && answerOf(item, x) != null);
+  });
+  block.append(input);
+  return block;
+}
+
+function answerOf(item, q) {
+  const typed = String(item.other[q.qid] || "").trim();
+  const picked = item.picks[q.qid];
+  if (q.multi_select) {
+    const set = Array.isArray(picked) ? picked.slice() : [];
+    if (typed) set.push(typed);
+    return set.length ? set : null;
+  }
+  return typed || picked || null;
+}
+
+async function answerQuestions(item, button) {
+  button.disabled = true;
+  item.error = "";
+  const answers = {};
+  for (const q of item.questions) if (!q.answered) answers[q.qid] = answerOf(item, q);
+  try {
+    const res = await api("/phone-api/clarify/answer", {
+      method: "POST",
+      body: JSON.stringify({ request_id: item.request_id, answers })
+    });
+    if (res.status === 409) {
+      DESKTOP.list = DESKTOP.list.filter((x) => x !== item);
+      DESKTOP.sig = "";
+      renderApprovals();
+      return;
+    }
+    if (!res.ok) {
+      item.error = await errorMessage(res);
+      repaintQuestions();
+      return;
+    }
+    item.sent = true;
+    repaintQuestions();
+    setTimeout(checkActive, 1500);
+  } catch (e) {
+    if (e.status === 401) return showKey(e.message);
+    item.error = e.message || "Could not send the answer";
+    repaintQuestions();
+  }
 }
 
 function approvalCard(run, approval) {
@@ -5435,7 +5648,67 @@ $("drawer").addEventListener("touchend", (event) => {
 }, { passive: true });
 $("profile-chip").addEventListener("click", () => toggleSheet(true));
 $("cron-refresh").addEventListener("click", () => loadCron());
-$("status-refresh").addEventListener("click", () => loadStatus());
+$("status-refresh").addEventListener("click", () => refreshStatus());
+
+// Pull down at the top of a list to reload it. The tip sits above the list
+// (renders rebuild the list's contents) and grows with the pull.
+const PULL = { trigger: 56, max: 84 };
+
+function pullToRefresh(listId, refresh) {
+  const list = $(listId);
+  const tip = document.createElement("div");
+  tip.className = "pull-tip";
+  tip.setAttribute("aria-hidden", "true");
+  const spin = document.createElement("span");
+  spin.className = "pull-spin";
+  const label = document.createElement("span");
+  tip.append(spin, label);
+  list.insertAdjacentElement("beforebegin", tip);
+  let startY = null;
+  let pulled = 0;
+  let busy = false;
+  const set = (h, text, spinning) => {
+    tip.style.height = h + "px";
+    label.textContent = text;
+    tip.classList.toggle("busy", Boolean(spinning));
+    spin.style.transform = spinning ? "" : "rotate(" + Math.round(h * 4) + "deg)";
+  };
+  list.addEventListener("touchstart", (e) => {
+    startY = !busy && list.scrollTop <= 0 && e.touches.length === 1 ? e.touches[0].clientY : null;
+    pulled = 0;
+  }, { passive: true });
+  list.addEventListener("touchmove", (e) => {
+    if (startY === null) return;
+    const dy = e.touches[0].clientY - startY;
+    if (dy <= 0) { pulled = 0; set(0, "", false); return; }
+    pulled = Math.min(PULL.max, dy * 0.5);
+    set(pulled, pulled >= PULL.trigger ? "Release to refresh" : "Pull to refresh", false);
+  }, { passive: true });
+  const end = async () => {
+    if (startY === null) return;
+    startY = null;
+    if (pulled < PULL.trigger) { set(0, "", false); return; }
+    busy = true;
+    set(40, "Refreshing…", true);
+    const started = Date.now();
+    let text = "Updated " + clockTime(Date.now());
+    try {
+      await refresh();
+    } catch (e) {
+      text = "Could not refresh";
+    }
+    await new Promise((r) => setTimeout(r, Math.max(0, 500 - (Date.now() - started))));
+    set(40, text, false);
+    setTimeout(() => { set(0, "", false); busy = false; }, 900);
+  };
+  list.addEventListener("touchend", end, { passive: true });
+  list.addEventListener("touchcancel", () => { startY = null; if (!busy) set(0, "", false); }, { passive: true });
+}
+
+pullToRefresh("session-list", async () => { await loadSessions(true); await checkActive(); });
+pullToRefresh("status-list", () => refreshStatus());
+pullToRefresh("bots-list", () => loadBots());
+pullToRefresh("cron-list", () => loadCron());
 $("bots-refresh").addEventListener("click", () => loadBots());
 $("job-back").addEventListener("click", () => {
   if (history.state && history.state.job) history.back();
