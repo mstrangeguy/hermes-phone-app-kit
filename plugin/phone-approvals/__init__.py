@@ -20,6 +20,7 @@ Relies on tools.approval internals (list_gateway_approvals,
 resolve_gateway_approval). Re-run tests/plugin_test.py after a Hermes update.
 """
 
+import functools
 import json
 import logging
 import os
@@ -31,6 +32,8 @@ logger = logging.getLogger(__name__)
 
 CHOICES = ("once", "deny")
 REQUEST_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+# What the phone proxy accepts as a chat id (serve.py SESSION_ID).
+PHONE_ID = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 TICK = 1.0
 DECISION_TTL = 15 * 60
 SWEEP_EVERY = 60
@@ -94,6 +97,16 @@ def _redact(command):
     return text
 
 
+def _phone_id(session_key, session_id=""):
+    """The id the phone knows the chat by. Hermes v0.21's desktop keys are
+    session ids; v0.22's gateway keys (agent:main:local:dm:...) are not, so
+    the session id stands in for them."""
+    for value in (session_key, session_id):
+        if value and PHONE_ID.match(str(value)):
+            return str(value)
+    return ""
+
+
 def _live_ids(session_key):
     from tools.approval import list_gateway_approvals
 
@@ -107,6 +120,9 @@ def _on_request(session_key="", coalesced=False, **kwargs):
     # Replies the phone started have their own card on the run stream.
     if _session_env("HERMES_SESSION_PLATFORM") == "api_server":
         return
+    phone_id = _phone_id(session_key, kwargs.get("session_id") or _session_env("HERMES_SESSION_ID"))
+    if not phone_id:
+        return  # the phone could not tell which chat it belongs to
     try:
         from tools.approval import list_gateway_approvals
 
@@ -125,7 +141,7 @@ def _on_request(session_key="", coalesced=False, **kwargs):
         rid = entry["request_id"]
         marker = {
             "request_id": rid,
-            "session_key": session_key,
+            "session_key": phone_id,
             "pid": os.getpid(),
             "created": time.time(),
             "source": source,
@@ -225,6 +241,7 @@ def _run():
         try:
             _reconcile()
             clarifying = _reconcile_clarify()
+            clarifying = _reconcile_clarify_v22() or clarifying
             if time.monotonic() - _last_sweep[0] > SWEEP_EVERY:
                 _last_sweep[0] = time.monotonic()
                 with _lock:
@@ -234,7 +251,7 @@ def _run():
         except Exception:
             logger.debug("phone-approvals: worker tick failed", exc_info=True)
         with _lock:
-            if not _mine and not clarifying and not _clarify:
+            if not _mine and not clarifying and not _clarify and not _v22 and not _batch_params:
                 _worker[0] = None
                 return
         time.sleep(TICK)
@@ -392,19 +409,284 @@ def _reconcile_clarify():
     return bool(open_now) or _clarify_watch[0] > 0
 
 
-def _on_human_input(kind="", **kwargs):
+# --- Clarify questions on Hermes v0.22+ ------------------------------------------
+# On v0.22 the Desktop attaches to the gateway, which asks in one of two ways,
+# neither through tui_gateway:
+#   a. Batch (the turn's submitter declared clarify_batch, as the Desktop
+#      composer does): one gateway.session_server_requests request, method
+#      "clarify", answered per question with lock_answer (the Desktop's
+#      clarify.lock). The last lock settles it and Hermes withdraws the card
+#      on every viewer (request.cancel, reason "resolved").
+#   b. Otherwise one tools.clarify_gateway entry per question, answered with
+#      resolve_gateway_clarify (what the Desktop's clarify.respond calls).
+#      The turn then re-reads its prompts and publishes clarify.settled, which
+#      closes the Desktop card.
+# Markers and decisions use the same files and format as above; a path-b
+# card is one marker with one question, qid "q0".
+# The phone needs the chat's session id, and path b knows only the gateway
+# key, so the clarify hook (which runs on the turn's thread) notes both, plus
+# the platform and the profile's folders.
+# v0.22.5 keeps a batch's questions only in the frame it sends, so a
+# pass-through wrapper on ask_viewer_result notes them; v0.22.6+ lists them
+# itself (session_server_requests.open_requests) and the wrapper is not
+# installed.
+
+_v22 = {}  # marker id -> (pending_dir, decisions_dir)
+_v22_created = {}  # marker id -> first seen (v0.22.5 batches carry no time)
+_routes = {}  # session id or gateway key -> route dict (from the clarify hook)
+_batch_params = {}  # (id(events), session id) -> {"qids", "params"} (v0.22.5 only)
+
+
+def _route(*names):
+    with _lock:
+        for name in names:
+            if name and name in _routes:
+                return dict(_routes[name])
+    return None
+
+
+def _open_batches():
+    """{request id: (pending, questions)} for open batch clarify requests here."""
+    from gateway import session_server_requests as ssr
+
+    with ssr._lock:
+        items = [(rid, p) for rid, p in ssr._open.items() if p.method == "clarify" and p.qids]
+    listing = getattr(ssr, "open_requests", None)
+    out = {}
+    for rid, pending in items:
+        questions = None
+        if listing is not None:  # v0.22.6+
+            for entry in listing(pending.events, pending.session_id):
+                if entry.get("id") == rid:
+                    questions = (entry.get("params") or {}).get("questions")
+        else:
+            with _lock:
+                seen = _batch_params.get((id(pending.events), pending.session_id))
+            if seen and tuple(seen["qids"]) == tuple(pending.qids):
+                questions = seen["params"].get("questions")
+        if questions:
+            out[rid] = (pending, questions)
+    return out
+
+
+def _open_singles():
+    """{clarify id: entry} for unanswered per-question clarify cards here."""
+    from tools import clarify_gateway
+
+    with clarify_gateway._lock:
+        ids = list(clarify_gateway._entries)
+    out = {}
+    for cid in ids:
+        entry = clarify_gateway.get_pending(cid)
+        if entry is not None:
+            out[cid] = entry
+    return out
+
+
+def _question(qid, item):
+    return {
+        "qid": str(qid or "")[:40],
+        "question": str(item.get("question") or "")[:2000],
+        "choices": [str(c)[:300] for c in (item.get("choices") or [])][:12],
+        "multi_select": bool(item.get("multi_select")),
+    }
+
+
+def _write_marker(rid, phone_id, questions, answered, dirs):
+    pending_dir, _decisions_dir = dirs
+    with _lock:
+        created = _v22_created.setdefault(rid, time.time())
+    marker = {"request_id": rid, "kind": "clarify", "session_key": phone_id, "pid": os.getpid(),
+              "created": created, "questions": questions, "answered": sorted(answered)}
+    path = os.path.join(pending_dir, rid + ".json")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            if json.load(handle) == marker:
+                return True
+    except (OSError, ValueError):
+        pass
+    try:
+        _write_json(path, marker)
+    except OSError:
+        logger.debug("phone-approvals: could not write clarify marker", exc_info=True)
+        return False
+    return True
+
+
+def _read_answers(decision_path):
+    try:
+        with open(decision_path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        data = None
+    _remove(decision_path)
+    answers = data.get("answers") if isinstance(data, dict) else None
+    return answers if isinstance(answers, dict) else None
+
+
+def _apply_batch(rid, pending, decision_path):
+    from gateway import session_server_requests as ssr
+
+    answers = _read_answers(decision_path)
+    if answers is None:
+        return
+
+    def ours(session_id, events):
+        # The request this marker was written for, still open in this process.
+        return session_id == pending.session_id and events is pending.events
+
+    remaining = None
+    for qid in list(pending.qids):
+        if qid in pending.locked:
+            continue  # answered on the desktop already
+        try:
+            remaining = ssr.lock_answer(rid, qid, _clean_clarify_answer(answers.get(qid)), session_ok=ours)
+        except ValueError:
+            return
+        if remaining is None:
+            return  # the wait already ended
+    if remaining == []:
+        logger.info("phone-approvals: clarify answered from the phone")
+
+
+def _apply_single(cid, decision_path):
+    from tools import clarify_gateway
+
+    answers = _read_answers(decision_path)
+    if answers is None:
+        return
+    value = _clean_clarify_answer(answers.get("q0"))
+    if clarify_gateway.resolve_gateway_clarify(cid, clarify_gateway.SKIPPED if value is None else value):
+        logger.info("phone-approvals: clarify answered from the phone")
+
+
+def _reconcile_clarify_v22():
+    """Hermes v0.22+: markers for open clarify questions, phone answers applied,
+    finished markers dropped. Returns True while one is open."""
+    try:
+        batches = _open_batches()
+    except Exception:
+        batches = {}
+    try:
+        singles = _open_singles()
+    except Exception:
+        singles = {}
+    if not batches and not singles and not _v22:
+        return False
+    live = set()
+    for rid, (pending, questions) in batches.items():
+        if not REQUEST_ID.match(rid):
+            continue
+        route = _route(pending.session_id)
+        if route and route["platform"] == "api_server":
+            continue
+        phone_id = _phone_id(pending.session_id)
+        try:
+            dirs = route["dirs"] if route else _clarify_dirs()
+        except OSError:
+            continue
+        if not phone_id:
+            continue
+        live.add(rid)
+        decision = os.path.join(dirs[1], rid + ".json")
+        if rid in _v22 and os.path.exists(decision):
+            _apply_batch(rid, pending, decision)
+            continue
+        items = [_question(q.get("qid"), q) for q in questions[:5] if isinstance(q, dict)]
+        if _write_marker(rid, phone_id, items, dict(pending.locked), dirs):
+            _v22[rid] = dirs
+    for cid, entry in singles.items():
+        if not REQUEST_ID.match(cid):
+            continue
+        route = _route(entry.session_key)
+        # Without the hook's note this card's chat (and whether the phone
+        # started it) is unknown: leave it to the desktop.
+        if not route or route["platform"] == "api_server":
+            continue
+        phone_id = _phone_id(route["session_id"])
+        if not phone_id:
+            continue
+        live.add(cid)
+        dirs = route["dirs"]
+        decision = os.path.join(dirs[1], cid + ".json")
+        if cid in _v22 and os.path.exists(decision):
+            _apply_single(cid, decision)
+            continue
+        item = _question("q0", {"question": entry.question, "choices": entry.choices,
+                                "multi_select": entry.multi_select})
+        if _write_marker(cid, phone_id, [item], {}, dirs):
+            _v22[cid] = dirs
+    for rid in [r for r in _v22 if r not in live]:
+        p_dir, d_dir = _v22.pop(rid)
+        with _lock:
+            _v22_created.pop(rid, None)
+        _remove(os.path.join(p_dir, rid + ".json"))
+        _remove(os.path.join(d_dir, rid + ".json"))
+    return bool(live)
+
+
+def _note_batches():
+    """v0.22.5 only: note a batch's questions while it is asked (see above)."""
+    try:
+        from gateway import session_server_requests as ssr
+    except Exception:
+        return  # Hermes v0.21: no gateway batch requests
+    original = getattr(ssr, "ask_viewer_result", None)
+    if original is None or hasattr(ssr, "open_requests") or getattr(original, "_phone_approvals", False):
+        return
+
+    @functools.wraps(original)
+    def ask_viewer_result(events, session_id, method, params, *args, **kwargs):
+        qids = kwargs.get("qids")
+        noted = method == "clarify" and bool(qids) and isinstance(params, dict)
+        key = (id(events), session_id)
+        if noted:
+            with _lock:
+                _batch_params[key] = {"qids": tuple(qids), "params": params}
+            _ensure_worker()
+        try:
+            return original(events, session_id, method, params, *args, **kwargs)
+        finally:
+            if noted:
+                with _lock:
+                    if (_batch_params.get(key) or {}).get("params") is params:
+                        _batch_params.pop(key, None)
+
+    ask_viewer_result._phone_approvals = True
+    ssr.ask_viewer_result = ask_viewer_result
+
+
+def _on_human_input(kind="", session_id="", session_key="", platform="", **kwargs):
     if kind != "clarify":
         return
+    route = None
+    if session_id or session_key:
+        try:
+            # Inside the turn's profile scope: the right phone-approvals folder.
+            route = {"session_id": str(session_id or ""), "platform": str(platform or ""),
+                     "dirs": _clarify_dirs(), "count": 0}
+        except Exception:
+            logger.debug("phone-approvals: could not note the clarify route", exc_info=True)
     with _lock:
         _clarify_watch[0] += 1
+        if route is not None:
+            for name in {session_id, session_key} - {""}:
+                held = _routes.setdefault(name, route)
+                held["count"] += 1
     _ensure_worker()
 
 
-def _on_human_input_done(kind="", **kwargs):
+def _on_human_input_done(kind="", session_id="", session_key="", **kwargs):
     if kind != "clarify":
         return
     with _lock:
         _clarify_watch[0] = max(0, _clarify_watch[0] - 1)
+        for name in {session_id, session_key} - {""}:
+            held = _routes.get(name)
+            if held is not None:
+                held["count"] -= 1
+                if held["count"] <= 0:
+                    _routes.pop(name, None)
 
 
 def register(ctx):
@@ -412,3 +694,7 @@ def register(ctx):
     ctx.register_hook("post_approval_response", _on_response)
     ctx.register_hook("on_human_input_request", _on_human_input)
     ctx.register_hook("on_human_input_resolved", _on_human_input_done)
+    try:
+        _note_batches()
+    except Exception:
+        logger.debug("phone-approvals: could not watch v0.22.5 clarify batches", exc_info=True)
