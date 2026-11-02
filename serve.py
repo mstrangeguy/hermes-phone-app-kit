@@ -975,7 +975,11 @@ def query_profile(client, query):
 def serve_profiles(client, lines):
     if key_refused(client, lines):
         return
-    send_response(client, 200, "OK", json.dumps({"profiles": served_profiles()}), "application/json")
+    status = status_settings()
+    body = {"profiles": served_profiles(), "status": status is not None,
+            # Status is the screen the app opens on, unless "start": false.
+            "status_start": status is not None and status.get("start") is not False}
+    send_response(client, 200, "OK", json.dumps(body), "application/json")
 
 
 def serve_meta(client, target, lines):
@@ -1525,6 +1529,113 @@ def cron_runs(profile, job_id, limit=CRON_RUNS_MAX):
     return runs[:limit]
 
 
+# --- Status screen -------------------------------------------------------------
+# Optional. config.json "status": {"enabled": true, "file": "<path>"} turns it
+# on. The cards come from that local JSON file, which something on this Mac
+# (a monitor, a script) writes: {"updated": "<ISO time>", "cards": [{"id",
+# "title", "state": ok|warn|bad|info, "summary", "lines": [...], "link":
+# "#s=<session>&p=<profile>"}]}. The proxy adds one card of its own: cron jobs
+# whose last run failed. Read-only; nothing here changes anything.
+
+STATUS_PATH = "/phone-api/status"
+STATUS_FILE_DEFAULT = os.path.join(ROOT, "status-cards.json")
+STATUS_STALE = 5 * 60
+STATUS_CARDS_MAX = 12
+STATUS_STATES = ("ok", "warn", "bad", "info")
+STATUS_LINK = re.compile(r"^#(?:s=[A-Za-z0-9_.:-]{1,128}(?:&p=[A-Za-z0-9_-]{1,64})?|cron(?:=[A-Za-z0-9_-]{1,64}(?:&p=[A-Za-z0-9_-]{1,64})?)?|bots)$")
+
+
+def status_settings():
+    """The status block when the screen is on, else None. Read on each request."""
+    block = load_settings().get("status")
+    if not isinstance(block, dict) or block.get("enabled") is not True:
+        return None
+    return block
+
+
+def status_text(value, limit):
+    return " ".join(value.split())[:limit] if isinstance(value, str) else ""
+
+
+def clean_status_card(raw):
+    if not isinstance(raw, dict):
+        return None
+    title = status_text(raw.get("title"), 80)
+    if not title:
+        return None
+    lines = raw.get("lines") if isinstance(raw.get("lines"), list) else []
+    link = raw.get("link") if isinstance(raw.get("link"), str) and STATUS_LINK.match(raw["link"]) else ""
+    return {"id": re.sub(r"[^A-Za-z0-9_-]", "", str(raw.get("id") or ""))[:60] or None,
+            "title": title,
+            "state": raw.get("state") if raw.get("state") in STATUS_STATES else "info",
+            "summary": status_text(raw.get("summary"), 160),
+            "lines": [t for t in (status_text(x, 200) for x in lines[:8]) if t],
+            "link": link}
+
+
+def status_file_cards(path):
+    """(updated ISO string or None, age seconds or None, cards) from the local file."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return None, None, []
+    if not isinstance(data, dict):
+        return None, None, []
+    updated = data.get("updated") if isinstance(data.get("updated"), str) else None
+    stamp = iso_stamp(updated) if updated else None
+    if stamp is None:
+        try:
+            stamp = os.path.getmtime(path)
+        except OSError:
+            stamp = None
+    age = (time.time() - stamp) if stamp is not None else None
+    cards = [c for c in (clean_status_card(r) for r in (data.get("cards") or [])[:STATUS_CARDS_MAX]
+                         if isinstance(data.get("cards"), list)) if c]
+    return updated, age, cards
+
+
+def cron_failed_card(profiles):
+    """One card: enabled cron jobs whose last run failed, across the served profiles."""
+    failed = []
+    for profile in profiles:
+        for job in cron_jobs(profile):
+            if job.get("enabled") is False or job.get("state") in ("completed", "disabled"):
+                continue
+            last = str(job.get("last_status") or "").lower()
+            # The same rule as the Cron screen's red dot (lists.js jobDot).
+            if job.get("state") == "error" or job.get("last_error") or "error" in last or "fail" in last:
+                failed.append(job)
+    if not failed:
+        return {"id": "cron", "title": "Cron jobs", "state": "ok", "summary": "No failed jobs",
+                "lines": [], "link": "#cron"}
+    lines = []
+    for job in failed[:8]:
+        who = "" if job.get("profile") in (None, "", "default") else " (%s)" % job["profile"]
+        lines.append(status_text("%s%s: %s" % (job.get("name") or job.get("id"), who,
+                                                job.get("last_status") or job.get("state") or "failed"), 200))
+    return {"id": "cron", "title": "Cron jobs", "state": "bad",
+            "summary": "%d failed" % len(failed), "lines": lines,
+            "link": "#cron" if len(failed) > 1 else "#cron=%s%s" % (
+                failed[0]["id"], "" if failed[0].get("profile") in (None, "", "default") else "&p=" + failed[0]["profile"])}
+
+
+def status_body():
+    block = status_settings()
+    if block is None:
+        return {"enabled": False, "cards": []}
+    path = os.path.expanduser(str(block.get("file") or STATUS_FILE_DEFAULT))
+    updated, age, cards = status_file_cards(path)
+    cards.append(cron_failed_card(served_profiles()))
+    return {"enabled": True, "updated": updated, "stale": age is None or age > STATUS_STALE, "cards": cards}
+
+
+def serve_status(client, lines):
+    if key_refused(client, lines):
+        return
+    send_response(client, 200, "OK", json.dumps(status_body()), "application/json")
+
+
 def cron_output(profile, job_id, name):
     """(text, truncated) or None. Only a file named like Hermes's own output."""
     if not JOB_ID.match(job_id or "") or not OUTPUT_NAME.match(name or ""):
@@ -2030,9 +2141,9 @@ AUTH_PREFIX = "/phone-api/auth/"
 # Answered here, not by Hermes: no key goes out for them.
 LOCAL_API = (BUSY_PATH, ACTIVE_PATH, DECIDE_PATH, PROFILES_PATH, META_PATH,
              CRON_PATH, CRON_RUNS_PATH, CRON_OUTPUT_PATH, UPLOAD_PATH, MEDIA_PATH,
-             REACTIONS_PATH, REACTIONS_UNSEEN_PATH, SEARCH_PATH, DESKTOP_SEND_PATH) + PUSH_PATHS
+             REACTIONS_PATH, REACTIONS_UNSEEN_PATH, SEARCH_PATH, DESKTOP_SEND_PATH, STATUS_PATH) + PUSH_PATHS
 # Polls that must not keep a Face ID session awake.
-BACKGROUND = (BUSY_PATH, ACTIVE_PATH, PROFILES_PATH, META_PATH)
+BACKGROUND = (BUSY_PATH, ACTIVE_PATH, PROFILES_PATH, META_PATH, STATUS_PATH)
 RUN_APPROVAL = re.compile(r"^/v1/runs/([A-Za-z0-9_.:-]{1,128})/approval$")
 
 
@@ -2223,6 +2334,9 @@ def handle_client(client, upstream_addr=UPSTREAM):
             return
         if local in (CRON_PATH, CRON_RUNS_PATH, CRON_OUTPUT_PATH) and method == "GET":
             serve_cron(client, target, lines, local)
+            return
+        if local == STATUS_PATH and method == "GET":
+            serve_status(client, lines)
             return
         if local == DECIDE_PATH and method == "POST":
             serve_decide(client, lines, leftover)

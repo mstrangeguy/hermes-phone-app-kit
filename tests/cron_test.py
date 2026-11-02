@@ -33,7 +33,7 @@ for _path in (faceid.CONFIG_PATH, faceid.SETUP_PATH, serve.CONFIG_PATH):
 DEFAULT_KEY = "default-key-0123456789"
 HA_KEY = "ha-key-abcdefghijklmnop"
 home = os.path.join(work, "home")
-ha = os.path.join(home, "profiles", "ha-updates")
+ha = os.path.join(home, "profiles", "ops")
 os.makedirs(ha, exist_ok=True)
 with open(os.path.join(home, ".env"), "w") as handle:
     handle.write("API_SERVER_KEY=%s\n" % DEFAULT_KEY)
@@ -176,17 +176,17 @@ check("default jobs only, bad rows skipped", status == 200 and [j["id"] for j in
 status, body = call("/phone-api/cron?profile=all")
 check("all profiles", status == 200 and sorted(j["id"] for j in body["jobs"]) == ["aaa111", "bbb222"])
 hj = [j for j in body["jobs"] if j["id"] == "bbb222"][0]
-check("profile tagged", hj["profile"] == "ha-updates")
+check("profile tagged", hj["profile"] == "ops")
 check("schedule flattened", hj["schedule"] == "15 3 * * *" and hj["schedule_kind"] == "cron")
 check("runs completed", hj["runs_completed"] == 2)
 check("long fields clipped", len(hj["prompt"]) == 4000 and len(hj["last_error"]) == 600)
 check("model, base_url, origin not sent", not any(k in hj for k in ("model", "base_url", "origin")))
-check("profile=ha-updates", [j["id"] for j in call("/phone-api/cron?profile=ha-updates")[1]["jobs"]] == ["bbb222"])
+check("profile=ops", [j["id"] for j in call("/phone-api/cron?profile=ops")[1]["jobs"]] == ["bbb222"])
 check("unknown profile 404", call("/phone-api/cron?profile=nope")[0] == 404)
 check("needs the key", call("/phone-api/cron", key="wrong")[0] == 401)
 
 # --- Runs -------------------------------------------------------------------
-status, body = call("/phone-api/cron/runs?profile=ha-updates&job=bbb222")
+status, body = call("/phone-api/cron/runs?profile=ops&job=bbb222")
 runs = body.get("runs", []) if isinstance(body, dict) else []
 check("runs listed newest first", status == 200 and len(runs) == 3 and runs[0]["status"] == "failed")
 check("failed run keeps error and delivery", runs and runs[0]["error"] == "boom" and runs[0]["delivery"] == "failed")
@@ -198,23 +198,23 @@ check("output before the run log still listed", runs and runs[2]["output"] == fn
 check("non-cron session ignored", runs and runs[2]["session"] is None)
 check("other job's run not listed", len(runs) == 3)
 check("job with no run log", call("/phone-api/cron/runs?job=aaa111")[1]["runs"][0]["output"] == fname(t2))
-check("bad job id 400", call("/phone-api/cron/runs?profile=ha-updates&job=../x")[0] == 400)
-check("missing job id 400", call("/phone-api/cron/runs?profile=ha-updates")[0] == 400)
-check("unknown job: empty", call("/phone-api/cron/runs?profile=ha-updates&job=zzz")[1] == {"runs": []})
+check("bad job id 400", call("/phone-api/cron/runs?profile=ops&job=../x")[0] == 400)
+check("missing job id 400", call("/phone-api/cron/runs?profile=ops")[0] == 400)
+check("unknown job: empty", call("/phone-api/cron/runs?profile=ops&job=zzz")[1] == {"runs": []})
 
 # --- Output -----------------------------------------------------------------
-status, body = call("/phone-api/cron/output?profile=ha-updates&job=bbb222&file=" + fname(t1 + 15))
+status, body = call("/phone-api/cron/output?profile=ops&job=bbb222&file=" + fname(t1 + 15))
 check("output read", status == 200 and "all good" in body["text"] and body["truncated"] is False)
 status, body = call("/phone-api/cron/output?job=aaa111&file=" + fname(t2))
 check("big output cut", status == 200 and len(body["text"]) == serve.OUTPUT_MAX and body["truncated"] is True)
 for bad in ("notes.txt", "../jobs.json", "..%2Fjobs.json", "%2E%2E%2F..%2Fjobs.secret.md", ""):
-    check("refused file %r" % bad, call("/phone-api/cron/output?profile=ha-updates&job=bbb222&file=" + bad)[0] == 404)
-check("refused job ..", call("/phone-api/cron/output?profile=ha-updates&job=..&file=" + fname(t0))[0] == 400)
+    check("refused file %r" % bad, call("/phone-api/cron/output?profile=ops&job=bbb222&file=" + bad)[0] == 404)
+check("refused job ..", call("/phone-api/cron/output?profile=ops&job=..&file=" + fname(t0))[0] == 400)
 check("output from other profile not found",
       call("/phone-api/cron/output?job=bbb222&file=" + fname(t0))[0] == 404)
 os.symlink(os.path.join(ha, "cron", "jobs.json"), os.path.join(out_dir, "2020-01-01_00-00-00.md"))
 check("symlink out of the folder refused",
-      call("/phone-api/cron/output?profile=ha-updates&job=bbb222&file=2020-01-01_00-00-00.md")[0] == 404)
+      call("/phone-api/cron/output?profile=ops&job=bbb222&file=2020-01-01_00-00-00.md")[0] == 404)
 os.remove(os.path.join(out_dir, "2020-01-01_00-00-00.md"))
 check("output needs the key", call("/phone-api/cron/output?job=aaa111&file=" + fname(t2), key="")[0] == 401)
 
@@ -226,6 +226,48 @@ check("locked without unlock cookie", call("/phone-api/cron")[0] == 401)
 faceid.session_valid = lambda token, touch=False: True
 check("open with unlock cookie", call("/phone-api/cron", key="")[0] == 200)
 faceid.enrolled, faceid.session_valid = real
+
+# --- Status screen ------------------------------------------------------------
+status, body = call("/phone-api/profiles")
+check("status: off by default", status == 200 and body.get("status") is False and body.get("status_start") is False)
+status, body = call("/phone-api/status")
+check("status: endpoint says off", status == 200 and body == {"enabled": False, "cards": []})
+cards_path = os.path.join(work, "status-cards.json")
+with open(serve.CONFIG_PATH, "w") as handle:
+    json.dump({"status": {"enabled": True, "file": cards_path}}, handle)
+status, body = call("/phone-api/profiles")
+check("status: on, and the opening screen by default", body.get("status") is True and body.get("status_start") is True)
+status, body = call("/phone-api/status")
+check("status: no file yet -> stale, cron card only",
+      status == 200 and body["enabled"] and body["stale"] and [c["id"] for c in body["cards"]] == ["cron"])
+cron_card = body["cards"][-1]
+check("status: cron card lists the failed job (last_error) and links to it",
+      cron_card["state"] == "bad" and cron_card["summary"] == "1 failed"
+      and cron_card["lines"] == ["HA job (ops): ok"] and cron_card["link"] == "#cron=bbb222&p=ops")
+with open(cards_path, "w") as handle:
+    json.dump({"updated": iso(time.time()), "cards": [
+        {"id": "house", "title": "  Main   House ", "state": "ok", "summary": "Connected",
+         "lines": ["one", 5, "x" * 500], "link": "#s=20260101_120000_abc123&p=ops"},
+        {"title": "Evil", "state": "boom", "link": "javascript:alert(1)"},
+        {"title": "Outside", "link": "https://example.com/#s=x"},
+        {"state": "ok"}, "not a card"] + [{"title": "n%d" % i} for i in range(20)]}, handle)
+status, body = call("/phone-api/status")
+cards = body["cards"]
+check("status: fresh file -> not stale", body["stale"] is False)
+check("status: card cleaned", cards[0] == {"id": "house", "title": "Main House", "state": "ok", "summary": "Connected",
+                                          "lines": ["one", "x" * 200], "link": "#s=20260101_120000_abc123&p=ops"})
+check("status: unknown state -> info, script link dropped", cards[1]["state"] == "info" and cards[1]["link"] == "")
+check("status: outside link dropped", cards[2]["link"] == "")
+check("status: untitled and non-dict cards skipped, at most 12 from the file plus cron",
+      len(cards) <= serve.STATUS_CARDS_MAX + 1 and cards[-1]["id"] == "cron" and all(c["title"] for c in cards))
+with open(cards_path, "w") as handle:
+    json.dump({"updated": iso(time.time() - 3600), "cards": []}, handle)
+check("status: an hour-old file is stale", call("/phone-api/status")[1]["stale"] is True)
+with open(serve.CONFIG_PATH, "w") as handle:
+    json.dump({"status": {"enabled": True, "file": cards_path, "start": False}}, handle)
+check("status: start false keeps the session list first", call("/phone-api/profiles")[1]["status_start"] is False)
+check("status: needs the key", call("/phone-api/status", key="wrong")[0] == 401)
+os.remove(serve.CONFIG_PATH)
 
 # --- Read-only --------------------------------------------------------------
 check("nothing written", tree_state() == before)

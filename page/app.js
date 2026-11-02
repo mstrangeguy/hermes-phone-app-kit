@@ -536,11 +536,11 @@ function setKey(value) {
   } catch (e) {}
 }
 
-const SCREENS = ["key-screen", "lock-screen", "setup-screen", "list-screen", "bots-screen", "cron-screen", "job-screen", "chat-screen"];
-// The drawer's three screens, in the desktop sidebar's order.
-const LIST_SCREENS = ["list-screen", "bots-screen", "cron-screen"];
+const SCREENS = ["key-screen", "lock-screen", "setup-screen", "status-screen", "list-screen", "bots-screen", "cron-screen", "job-screen", "chat-screen"];
+// The drawer's screens: the optional Status, then the desktop sidebar's three in its order.
+const LIST_SCREENS = ["status-screen", "list-screen", "bots-screen", "cron-screen"];
 // The status bar takes the colour of the header under it, so it reads as one band.
-const BAR_COLOR = { "list-screen": "#010409", "bots-screen": "#010409", "cron-screen": "#010409" };
+const BAR_COLOR = { "status-screen": "#010409", "list-screen": "#010409", "bots-screen": "#010409", "cron-screen": "#010409" };
 function show(id) {
   for (const screen of SCREENS) {
     $(screen).hidden = screen !== id;
@@ -866,6 +866,9 @@ async function loadProfiles() {
     if (res.ok) {
       const data = await res.json();
       if (Array.isArray(data.profiles) && data.profiles.length) PROFILES.list = data.profiles;
+      STATUS.enabled = data.status === true;
+      STATUS.start = data.status_start === true;
+      $("mode-status").hidden = !STATUS.enabled;
     }
   } catch (e) {
     if (e.status === 401) throw e;
@@ -1498,12 +1501,129 @@ function renderDrawer() {
   }
   if (DRAWER.mode === "cron") renderCronSheet();
   else if (DRAWER.mode === "bots") renderBotsSheet();
+  else if (DRAWER.mode === "status") renderStatusSheet();
   else renderSheet();
+}
+
+// --- Status -------------------------------------------------------------------
+// Optional (config.json "status"). One card per thing worth a glance, from a
+// file a local monitor writes, plus the proxy's own failed-cron card. A card
+// with a link opens that chat or cron job. Read-only.
+const STATUS = { enabled: false, start: false, cards: [], updated: "", stale: false, note: "", loaded: false, seq: 0, timer: null };
+const STATUS_DOT = { ok: "unread", warn: "approval", bad: "bad", info: "off" };
+
+async function loadStatus() {
+  const seq = ++STATUS.seq;
+  try {
+    const res = await api("/phone-api/status");
+    if (!res.ok) throw new Error(await errorMessage(res));
+    const data = await res.json();
+    if (seq !== STATUS.seq) return;
+    STATUS.cards = Array.isArray(data.cards) ? data.cards : [];
+    STATUS.updated = typeof data.updated === "string" ? data.updated : "";
+    STATUS.stale = data.stale === true;
+    STATUS.note = data.enabled === false ? "The Status screen is turned off on the Mac." : "";
+  } catch (e) {
+    if (e.status === 401) return showKey(e.message);
+    if (seq !== STATUS.seq) return;
+    STATUS.note = e.message || "Could not load the status";
+  }
+  STATUS.loaded = true;
+  if (!$("status-screen").hidden) renderStatus();
+}
+
+function statusCard(card) {
+  const el = document.createElement(card.link ? "button" : "div");
+  if (card.link) el.type = "button";
+  el.className = "session status-card state-" + card.state;
+  const row = document.createElement("div");
+  row.className = "row";
+  const dot = document.createElement("span");
+  dot.className = "sdot dot-" + (STATUS_DOT[card.state] || "off");
+  const name = document.createElement("span");
+  name.className = "name";
+  name.textContent = card.title;
+  const when = document.createElement("span");
+  when.className = "when";
+  when.textContent = card.summary || "";
+  row.append(dot, name, when);
+  el.append(row);
+  if (card.lines && card.lines.length) {
+    const list = document.createElement("ul");
+    list.className = "status-lines";
+    for (const line of card.lines) {
+      const li = document.createElement("li");
+      li.textContent = line;
+      list.append(li);
+    }
+    el.append(list);
+  }
+  if (card.link) el.addEventListener("click", () => openStatusLink(card.link));
+  return el;
+}
+
+function openStatusLink(link) {
+  if (typeof link !== "string" || !link.startsWith("#")) return;
+  history.pushState({}, "", location.pathname + link);
+  window.dispatchEvent(new PopStateEvent("popstate"));
+}
+
+function renderStatus() {
+  const root = $("status-list");
+  const scroll = root.scrollTop;
+  root.textContent = "";
+  if (STATUS.note) {
+    const note = document.createElement("div");
+    note.className = "empty note-line";
+    note.textContent = STATUS.note;
+    root.append(note);
+  }
+  if (STATUS.loaded && STATUS.stale) {
+    const stale = document.createElement("div");
+    stale.className = "empty note-line status-stale";
+    const at = stampOf(STATUS.updated);
+    stale.textContent = at ? "The monitor last updated this " + relTime(at) + ". It may have stopped."
+      : "No update from the monitor yet. Only the cron card is current.";
+    root.append(stale);
+  }
+  if (!STATUS.cards.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = STATUS.loaded ? "Nothing to show." : "Loading…";
+    root.append(empty);
+  }
+  for (const card of STATUS.cards) root.append(statusCard(card));
+  root.scrollTop = scroll;
+}
+
+function renderStatusSheet() {
+  const body = $("sheet-body");
+  body.textContent = "";
+  const note = document.createElement("p");
+  note.className = "sheet-note";
+  note.textContent = "Read-only. Refreshes every minute while open. Tap a card to open its chat.";
+  body.append(note);
+}
+
+function showStatus() {
+  DRAWER.mode = "status";
+  show("status-screen");
+  renderStatus();
+  loadStatus();
+  if (!STATUS.timer) {
+    STATUS.timer = setInterval(() => {
+      if ($("status-screen").hidden) { clearInterval(STATUS.timer); STATUS.timer = null; return; }
+      if (!document.hidden) loadStatus();
+    }, 60000);
+  }
 }
 
 function pickMode(mode) {
   toggleSheet(false);
-  if (mode === "cron") {
+  if (mode === "status") {
+    history.replaceState({ status: true }, "", "#status");
+    showStatus();
+  } else if (mode === "cron") {
     history.replaceState({ cron: true }, "", "#cron");
     showCron();
   } else if (mode === "bots") {
@@ -5270,7 +5390,10 @@ $("back").addEventListener("click", () => {
   toggleMenu(false);
   $("draft").blur();
   if (history.state && history.state.id) history.back();
-  else if (DRAWER.mode === "cron") {
+  else if (DRAWER.mode === "status" && STATUS.enabled) {
+    history.pushState({ status: true }, "", "#status");
+    showStatus();
+  } else if (DRAWER.mode === "cron") {
     history.pushState({ cron: true }, "", "#cron");
     showCron();
   } else if (DRAWER.mode === "bots") {
@@ -5286,6 +5409,7 @@ window.addEventListener("popstate", () => {
   const cron = cronHashTarget();
   if (cron) return void openCronTarget(cron);
   if (location.hash === "#bots") return void showBots();
+  if (location.hash === "#status" && STATUS.enabled) return void showStatus();
   const target = hashTarget();
   if (target) openSession(target.id, "Hermes", false, target.profile);
   else showList();
@@ -5311,6 +5435,7 @@ $("drawer").addEventListener("touchend", (event) => {
 }, { passive: true });
 $("profile-chip").addEventListener("click", () => toggleSheet(true));
 $("cron-refresh").addEventListener("click", () => loadCron());
+$("status-refresh").addEventListener("click", () => loadStatus());
 $("bots-refresh").addEventListener("click", () => loadBots());
 $("job-back").addEventListener("click", () => {
   if (history.state && history.state.job) history.back();
@@ -5485,7 +5610,9 @@ async function boot() {
   if (target) openSession(target.id, "Hermes", false, target.profile);
   else if (cron) openCronTarget(cron);
   else if (location.hash === "#bots") showBots();
+  else if (location.hash === "#status" && STATUS.enabled) showStatus();
   else if (last) openSession(last.sessionId, last.title, false, last.profile);
+  else if (STATUS.enabled && STATUS.start) showStatus();
   else show("list-screen");
 }
 

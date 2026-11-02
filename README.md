@@ -97,6 +97,7 @@ Written by the installer. Edit it by hand to change alerts; the alerts block is 
 | `upstream_port` | Hermes API port. Default 8642. |
 | `hermes_home` | Hermes home. Default `~/.hermes`. |
 | `desktop_image_refs` | `true` also adds the phone's `@image:` lines to messages sent into Desktop chats on Hermes v0.22+, for Desktops older than v0.22 that show only those. Off by default: with it on, the model may get each picture twice. Read on each send. |
+| `status` | Optional Status screen, e.g. `{"enabled": true}`. Off when missing. When on, it is first in the side panel and the screen the app opens on (unless `"start": false`). It shows cards from a local file (`"file"`, default `status-cards.json` here) that something on this Mac writes, plus a card of the proxy's own: cron jobs whose last run failed. Read on each request. See "Status screen" below. |
 | `alerts.channel` | `webpush`, `telegram`, `homeassistant` or `none`. |
 | `alerts.chat_id` | Telegram chat id. Empty means your Hermes home channel (`TELEGRAM_HOME_CHANNEL`, set with `/sethome`). |
 | `alerts.notify` | Home Assistant notify service, e.g. `mobile_app_my_iphone`. Uses `HASS_URL` and `HASS_TOKEN` from `.env`. |
@@ -118,6 +119,18 @@ Telegram and Home Assistant alerts are generic, for example "Hermes is waiting f
 - If Tailscale is off on the phone, the alert still arrives, but the app opens only once Tailscale is back on.
 - Deleting the Home Screen icon ends that phone's subscription. Turn notifications on again after re-adding it.
 - The keys and the list of phones are in `webpush.json` (mode 600, never committed). Deleting it makes a new key; every phone must turn notifications on again.
+
+### Status screen
+
+A read-only screen of cards, one per thing worth a glance. It is off until `config.json` has `"status": {"enabled": true}`. The app makes no cards of its own except **Cron jobs** (failed jobs across the profiles it serves). The rest come from a JSON file any local script or monitor can write:
+
+```json
+{"updated": "2026-11-01T20:30:00-08:00",
+ "cards": [{"id": "house", "title": "Home", "state": "ok", "summary": "Connected",
+            "lines": ["No open incidents"], "link": "#s=<session id>&p=<profile>"}]}
+```
+
+`state` is `ok`, `warn`, `bad` or `info`. `link` (optional) opens a chat (`#s=…`), a cron job (`#cron=<id>&p=<profile>`), `#cron` or `#bots`; any other link is dropped. Text is shown as plain text, never as HTML. Up to 12 cards, 8 lines each. If `updated` is more than 5 minutes old, the screen says the writer may have stopped. The page refreshes it every minute while it is open.
 
 ## Security
 

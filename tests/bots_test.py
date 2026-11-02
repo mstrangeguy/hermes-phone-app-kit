@@ -251,7 +251,8 @@ check("lists.js is a page request", serve.page_request("GET", "/lists.js"))
 scripts = re.findall(r'<script src="([^"]+)"></script>', html)
 check("lists.js loads before app.js", "lists.js" in scripts and scripts.index("lists.js") < scripts.index("app.js"))
 modes = re.findall(r'data-mode="([a-z]+)"', html)
-check("drawer order Sessions, Bots, Cron jobs", modes == ["sessions", "bots", "cron"])
+check("drawer order: optional Status, then Sessions, Bots, Cron jobs", modes == ["status", "sessions", "bots", "cron"])
+check("Status entry hidden until the Mac turns it on", re.search(r'data-mode="status"[^>]*\bhidden\b', html) is not None)
 check("bots screen in the page", 'id="bots-screen"' in html and 'id="bots-list"' in html)
 check("no inline script or style, no on* handlers",
       not re.search(r"<script(?![^>]*\bsrc=)", html) and "<style" not in html and

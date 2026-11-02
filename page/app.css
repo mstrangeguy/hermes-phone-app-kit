@@ -829,3 +829,13 @@ button.bucket.group::after { order: 3; }
 .offline .offline-more { color: var(--muted-fg); font-size: 15px; }
 .offline-retry { display: inline-flex; align-items: center; justify-content: center; align-self: flex-start;
   text-decoration: none; min-height: 44px; padding: 0 18px; margin-top: 6px; }
+
+/* Status screen: one card per thing worth a glance. */
+.status-card { display: block; width: 100%; text-align: left; }
+div.status-card { cursor: default; }
+.status-card .when { white-space: nowrap; }
+.status-card.state-bad .when { color: var(--danger); }
+.status-card.state-warn .when { color: #f59e0b; }
+.status-lines { margin: 4px 0 0 14px; padding: 0 0 0 14px; color: var(--muted-fg); font-size: 14px; line-height: 1.4; }
+.status-lines li { margin: 2px 0; overflow-wrap: anywhere; }
+.status-stale { color: #f59e0b; }

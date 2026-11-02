@@ -10,3 +10,5 @@ serve.pid
 __pycache__/
 *.tmp
 webpush.json
+status-cards.json
+*.bak-*
