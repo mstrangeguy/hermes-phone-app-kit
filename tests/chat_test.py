@@ -374,6 +374,22 @@ ok("a third tap starts over", !tap(0, 0, 5000) && tap(0, 0, 5100) && !tap(0, 0, 
 const hits = [{ id: "a", source: "cron" }, { id: "b", source: "desktop" }, { id: "c", source: "cron", pinned: true }];
 ok("search: cron hidden by default", P.searchRows(hits, false).map((h) => h.id).join() === "b,c");
 ok("search: setting on shows all", P.searchRows(hits, true).length === 3);
+
+const ask = (text, extra) => P.quickReplies([{ id: 1, role: "user", content: "hi" },
+  { id: 2, role: "assistant", content: text }].concat(extra || []));
+ok("quick: yes/no question offers the two answers", J((ask("Done the check.\n\nShould I make it?") || {}).answers) === J(P.QUICK_ANSWERS));
+ok("quick: 'Say go' offers them", ask("Here's the plan.\n\nSay go and I'll start with item 1.") !== null);
+ok("quick: an open question does not", ask("Which ones do you want?") === null);
+ok("quick: an either/or question does not", ask("Should I reload it, or leave it?") === null);
+ok("quick: no question, no buttons", ask("All done. Nothing needs you.") === null);
+ok("quick: lock mentioned anywhere, no buttons", ask("The front lock is jammed.\n\nShould I retry?") === null);
+ok("quick: alarm, thermostat, garage, siren, camera, disarm: none",
+  ["alarm", "thermostat", "garage door", "siren", "camera", "disarm"].every((w) => ask("This touches the " + w + ". Should I go ahead?") === null));
+ok("quick: 'block' and 'clock' are not a lock", ask("The clock and block list are fine. Should I continue?") !== null);
+ok("quick: a later user message hides them", P.quickReplies([{ id: 2, role: "assistant", content: "Should I?" }, { id: 3, role: "user", content: "yes" }]) === null);
+ok("quick: tool rows after the question are skipped", ask("Should I make it?", [{ id: 3, role: "tool", content: "x" }]) !== null);
+ok("quick: a tool-call-only step does not count as the question", ask("Want me to fix it?", [{ id: 3, role: "assistant", content: "" }]) !== null);
+ok("quick: question inside code ignored", ask("Run this:\n```\nshould I?\n```") === null);
 process.stdout.write(JSON.stringify(out));
 """
 

@@ -2675,6 +2675,7 @@ function renderTranscript(opts) {
   if (opts && opts.fromBottom != null) root.scrollTop = root.scrollHeight - opts.fromBottom;
   else root.scrollTop = stick ? root.scrollHeight : top;
   paintDraftHint();
+  paintQuick();
 }
 
 function paintDraftHint() {
@@ -3645,6 +3646,41 @@ function paintRunChrome() {
   }
   renderApprovals();
   paintPlan();
+  paintQuick();
+}
+
+// One-tap answers (PhoneParts.quickReplies): two buttons above the box when
+// Hermes's last message asks a plain yes/no question. A tap sends that exact
+// text, the same as typing it. Hidden while a reply runs, while anything is
+// typed or attached, and for questions about locks, the alarm and the like.
+const QUICK = { sig: "" };
+
+function paintQuick() {
+  const box = $("quick");
+  if (!box) return;
+  const offer = !$("chat-screen").hidden && state.sessionId && !liveRun(state.sessionId) &&
+    !$("draft").value.trim() && !PICS.items.length && !state.loadingEarlier
+    ? PhoneParts.quickReplies(state.messages) : null;
+  const sig = offer ? state.sessionId + ":" + offer.rowId : "";
+  if (sig === QUICK.sig && box.hidden === !offer) return;
+  QUICK.sig = sig;
+  box.hidden = !offer;
+  box.textContent = "";
+  if (!offer) return;
+  offer.answers.forEach((answer, i) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = i === 0 ? "yes" : "no";
+    button.textContent = answer;
+    button.addEventListener("click", () => {
+      if (liveRun(state.sessionId)) return;
+      box.querySelectorAll("button").forEach((b) => { b.disabled = true; });
+      QUICK.sig = "";  // repaint fresh next time, so a failed send leaves working buttons
+      notice("");
+      sendMessage(answer).finally(() => paintQuick());
+    });
+    box.append(button);
+  });
 }
 
 // Approvals raised in the desktop app (or any Hermes process running the
@@ -5361,6 +5397,7 @@ $("draft").addEventListener("input", () => {
   draft.style.height = "auto";
   draft.style.height = Math.min(draft.scrollHeight, 120) + "px";
   paintSendState();
+  paintQuick();
 });
 
 document.addEventListener("visibilitychange", () => {

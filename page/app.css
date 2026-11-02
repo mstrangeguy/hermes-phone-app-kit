@@ -779,6 +779,15 @@ button.bucket.group::after { order: 3; }
 }
 .react-pill.mine { border-color: color-mix(in srgb, var(--primary) 60%, transparent); background: color-mix(in srgb, var(--primary) 18%, var(--sidebar)); }
 
+/* One-tap answers above the message box. */
+.quick { display: flex; gap: 8px; padding: 0 2px 8px; flex-wrap: wrap; }
+.quick[hidden] { display: none; }
+.quick button {
+  font: inherit; font-size: 15px; padding: 7px 14px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--border); background: var(--sidebar); color: var(--fg);
+}
+.quick button.yes { border-color: var(--primary); color: var(--primary); }
+.quick button:disabled { opacity: 0.5; }
 /* Task list card above the message box, after the desktop's status stack. */
 .plan { margin: 0 0 8px; border: 1px solid var(--border); border-radius: 12px; background: var(--sidebar); overflow: hidden; }
 .plan[hidden] { display: none; }

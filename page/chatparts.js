@@ -210,9 +210,46 @@
     return { state: now - idleSince >= (stallMs || 120000) ? "stalled" : "queued", seenBusy, quiet: 0, idleSince };
   }
 
+  // One-tap answers. When the chat's last visible row is Hermes asking a
+  // plain yes/no question ("Should I make it?", "Say go and I'll start"),
+  // the page offers two buttons that send exactly this text, as if typed.
+  // Never for anything touching a lock, the alarm, the thermostat, a garage
+  // door, a siren or a camera: those answers are typed by hand.
+  const QUICK_ANSWERS = ["Yes, go ahead", "Not now"];
+  const QUICK_SENSITIVE = /\b(?:un)?lock(?:s|ed|ing)?\b|\balarm|\bthermostat|\bhvac\b|\bset ?points?\b|\bgarage|\bsiren|\bcamera|\bdisarm|\barm(?:ed|ing)?\b|\bheat(?:ing)?\b|\bcool(?:ing)?\b/i;
+  const QUICK_YESNO = /^(?:so,?\s+|and\s+|ok(?:ay)?,?\s+)?(?:should|shall|do|does|did|can|could|would|will|want|is|are|was|ok(?:ay)?|ready|go ahead|proceed|may)\b/i;
+  const QUICK_SAY_GO = /\bsay (?:go|yes)\b/i;
+
+  function quickLastLine(text) {
+    const noCode = String(text || "").replace(/```[\s\S]*?(?:```|$)/g, " ");
+    const lines = noCode.split("\n").map((l) => l.replace(/[*_`>#]+/g, "").trim()).filter(Boolean);
+    return lines.length ? lines[lines.length - 1] : "";
+  }
+
+  // rows: the transcript, oldest first. Returns {rowId, answers} or null.
+  function quickReplies(rows) {
+    const list = Array.isArray(rows) ? rows : [];
+    for (let i = list.length - 1; i >= 0; i--) {
+      const r = list[i];
+      if (!r || typeof r !== "object" || r.display_kind === "hidden" || r.role === "system" || r.role === "tool") continue;
+      if (r.role === "user") return null;
+      if (r.role !== "assistant") continue;
+      const text = rowText(r.content).trim();
+      if (!text) continue;  // a tool-call-only step
+      if (QUICK_SENSITIVE.test(text)) return null;
+      const last = quickLastLine(text);
+      const sentences = last.split(/(?<=[.!?])\s+/).filter(Boolean);
+      const ask = sentences.length ? sentences[sentences.length - 1] : "";
+      const yesNo = (/\?\s*$/.test(ask) && QUICK_YESNO.test(ask) && !/\bor\b/i.test(ask)) || QUICK_SAY_GO.test(last);
+      return yesNo ? { rowId: r.id, answers: QUICK_ANSWERS.slice() } : null;
+    }
+    return null;
+  }
+
   root.PhoneParts = {
     TODO_TOOLS, isTodoTool, parseTodos, todoTree, todoProgress, latestTodos, planVisible,
     QUICK_REACTIONS, applyReaction, mine, tapDetector, searchRows,
-    gatewayRoute, coreText, gatewayProgress, gatewayStep
+    gatewayRoute, coreText, gatewayProgress, gatewayStep,
+    QUICK_ANSWERS, quickReplies
   };
 })(typeof window !== "undefined" ? window : globalThis);
