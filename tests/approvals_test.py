@@ -162,6 +162,63 @@ serve.note_page()
 serve.check_desktop({}, [{"request_id": "e" * 32, "created": 1000.0}], alerted, now=1050.0)
 check("no alert while the page is on screen", len(sent) == 1)
 
+# --- Desktop questions (clarify) -----------------------------------------------
+QRID = "srq-" + "d" * 12
+cl_pending = os.path.join(base, "clarify", "pending")
+cl_decisions = os.path.join(base, "clarify", "decisions")
+for path in (cl_pending, cl_decisions):
+    os.makedirs(path, mode=0o700, exist_ok=True)
+
+
+def question_marker(rid, pid, answered=()):
+    with open(os.path.join(cl_pending, rid + ".json"), "w") as handle:
+        json.dump({"request_id": rid, "kind": "clarify", "session_key": "root", "pid": pid, "created": now,
+                   "answered": list(answered), "questions": [
+                       {"qid": "q0", "question": "Which house?", "choices": ["Home (Recommended)", "Cabin"],
+                        "multi_select": False},
+                       {"qid": "q1", "question": "Which checks?", "choices": ["Locks", "Lights"], "multi_select": True},
+                       {"qid": "q2", "question": "Anything else?", "choices": None, "multi_select": False}]}, handle)
+
+
+question_marker(QRID, os.getpid(), answered=["q2"])
+question_marker("srq-" + "e" * 12, 999999)
+status, body = call("GET", "/phone-api/active")
+qs = [a for a in json.loads(body)["approvals"] if a.get("kind") == "clarify"]
+check("question listed with /active (dead pid skipped)", [q["request_id"] for q in qs] == [QRID])
+check("question carries the lineage", set(qs[0]["sessions"]) == {"root", "tip"} if qs else False)
+q0 = qs[0]["questions"][0] if qs else {}
+check("Recommended label moved to an index", q0.get("choices") == ["Home", "Cabin"] and q0.get("recommended") == 0)
+check("desktop's answered question flagged", qs and qs[0]["questions"][2]["answered"] is True)
+
+A = "/phone-api/clarify/answer"
+check("question: wrong login refused", call("POST", A, {"request_id": QRID, "answers": {"q0": "Home"}},
+                                            login="x@example.com")[0] == 403)
+check("question: no API key refused", call("POST", A, {"request_id": QRID, "answers": {"q0": "Home"}}, key="")[0] == 401)
+check("question: all blank refused", call("POST", A, {"request_id": QRID, "answers": {"q0": None, "q1": []}})[0] == 400)
+check("question: list for a single question refused",
+      call("POST", A, {"request_id": QRID, "answers": {"q0": ["Home", "Cabin"]}})[0] == 400)
+check("question: unknown id 409", call("POST", A, {"request_id": "srq-" + "f" * 12, "answers": {"q0": "x"}})[0] == 409)
+check("question: dead process 409", call("POST", A, {"request_id": "srq-" + "e" * 12, "answers": {"q0": "x"}})[0] == 409)
+check("question: bad JSON 400", call("POST", A, raw=b"{nope")[0] == 400)
+check("question: no decision written yet", os.listdir(cl_decisions) == [])
+status, _ = call("POST", A, {"request_id": QRID, "answers": {"q0": " Cabin ", "q1": ["Locks", "Lights"],
+                                                             "q2": "ignored", "q9": "extra"}})
+check("question: answer accepted 202", status == 202)
+with open(os.path.join(cl_decisions, QRID + ".json")) as handle:
+    written = json.load(handle)["answers"]
+check("question: only open questions written, trimmed",
+      written == {"q0": "Cabin", "q1": ["Locks", "Lights"]})
+check("question: decision file mode 600",
+      os.stat(os.path.join(cl_decisions, QRID + ".json")).st_mode & 0o777 == 0o600)
+
+# The alert for a waiting question says it is a question.
+sent = []
+serve.send_alert = lambda config, message, urgent, push=None: sent.append((message, push)) or True
+serve.watching = lambda key: False
+alerted = set()
+serve.check_desktop({"channel": "webpush"}, [dict(qs[0], profile="default", created=now - 120)], alerted, now=now)
+check("question alert wording", sent and "question" in sent[-1][0] and sent[-1][1]["body"] == "Has a question for you.")
+
 server.shutdown()
 print("%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)

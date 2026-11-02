@@ -221,8 +221,10 @@ def _sweep(pending_dir, decisions_dir):
 
 def _run():
     while True:
+        clarifying = False
         try:
             _reconcile()
+            clarifying = _reconcile_clarify()
             if time.monotonic() - _last_sweep[0] > SWEEP_EVERY:
                 _last_sweep[0] = time.monotonic()
                 with _lock:
@@ -232,7 +234,7 @@ def _run():
         except Exception:
             logger.debug("phone-approvals: worker tick failed", exc_info=True)
         with _lock:
-            if not _mine:
+            if not _mine and not clarifying and not _clarify:
                 _worker[0] = None
                 return
         time.sleep(TICK)
@@ -247,6 +249,166 @@ def _ensure_worker():
     thread.start()
 
 
+# --- Clarify questions ---------------------------------------------------------
+# The desktop shows a clarify tool call (one to five questions, with or
+# without choices) as a card. Hermes holds it as an open server request
+# (tui_gateway.server_requests) in this process and takes answers one question
+# at a time (lock_answer; the last lock ends the wait). While one is open the
+# worker writes a marker the phone can read, and applies the phone's answers:
+#   clarify/pending/<request id>.json    questions, written here
+#   clarify/decisions/<request id>.json  {"answers": {qid: text | [texts] | null}}, from the phone
+# A decision is applied only while that request is still open here; answers
+# the desktop already locked are kept. When the phone's answers end the wait,
+# the desktop's card is withdrawn the way a timeout withdraws it.
+# Relies on tui_gateway internals (server_requests._open, lock_answer,
+# _emit_cancel; server._sessions). If they change, the phone shows nothing and
+# the desktop works as before.
+
+CLARIFY_ANSWER_LIMIT = 2000
+_clarify = {}  # request id -> (pending_dir, decisions_dir)
+_clarify_watch = [0]  # clarify waits running in this process (human-input hook)
+
+
+def _clarify_dirs():
+    from hermes_constants import get_hermes_home
+
+    base = os.path.join(str(get_hermes_home()), "phone-approvals")
+    root = os.path.join(base, "clarify")
+    pending = os.path.join(root, "pending")
+    decisions = os.path.join(root, "decisions")
+    for path in (base, root, pending, decisions):
+        os.makedirs(path, mode=0o700, exist_ok=True)
+        os.chmod(path, 0o700)
+    return pending, decisions
+
+
+def _open_clarify():
+    """{request id: ServerRequest} for every open clarify batch in this process."""
+    from tui_gateway import server_requests
+
+    with server_requests._lock:
+        return {rid: req for rid, req in server_requests._open.items()
+                if req.method == "clarify" and req.qids}
+
+
+def _session_key_for(sid):
+    try:
+        from tui_gateway import server
+
+        return str((server._sessions.get(sid) or {}).get("session_key") or "")
+    except Exception:
+        return ""
+
+
+def _clean_clarify_answer(value):
+    if value is None:
+        return None
+    if isinstance(value, list):
+        items = [str(v)[:CLARIFY_ANSWER_LIMIT] for v in value if str(v).strip()][:20]
+        return json.dumps(items, ensure_ascii=False) if items else None
+    text = str(value).strip()[:CLARIFY_ANSWER_LIMIT]
+    return text or None
+
+
+def _apply_clarify(rid, req, decision_path):
+    from tui_gateway import server_requests
+
+    try:
+        with open(decision_path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        data = None
+    _remove(decision_path)
+    answers = data.get("answers") if isinstance(data, dict) else None
+    if not isinstance(answers, dict):
+        return
+    remaining = None
+    for qid in list(req.qids):
+        if qid in req.locked:
+            continue  # answered on the desktop already
+        try:
+            remaining = server_requests.lock_answer(rid, qid, _clean_clarify_answer(answers.get(qid)))
+        except ValueError:
+            return
+        if remaining is None:
+            return  # the wait already ended
+    if remaining == []:
+        logger.info("phone-approvals: clarify answered from the phone")
+        try:
+            server_requests._emit_cancel(req, "answered")
+        except Exception:
+            logger.debug("phone-approvals: could not withdraw the desktop card", exc_info=True)
+
+
+def _reconcile_clarify():
+    """Write markers for open clarify batches, apply phone answers, drop finished ones.
+    Returns True while one is open (or a clarify wait is starting)."""
+    try:
+        open_now = _open_clarify()
+    except Exception:
+        return False
+    if not open_now and not _clarify:
+        return _clarify_watch[0] > 0
+    pending_dir, decisions_dir = _clarify_dirs()
+    for rid, req in open_now.items():
+        if not REQUEST_ID.match(rid):
+            continue
+        decision = os.path.join(decisions_dir, rid + ".json")
+        if rid in _clarify and os.path.exists(decision):
+            _apply_clarify(rid, req, decision)
+            continue
+        key = _session_key_for(req.sid)
+        if not key:
+            continue
+        questions = []
+        for item in (req.params.get("questions") or [])[:5]:
+            if not isinstance(item, dict):
+                continue
+            questions.append({
+                "qid": str(item.get("qid") or "")[:40],
+                "question": str(item.get("question") or "")[:2000],
+                "choices": [str(c)[:300] for c in (item.get("choices") or [])][:12],
+                "multi_select": bool(item.get("multi_select")),
+            })
+        marker = {"request_id": rid, "kind": "clarify", "session_key": key, "pid": os.getpid(),
+                  "created": req.created_at, "questions": questions, "answered": sorted(req.locked)}
+        path = os.path.join(pending_dir, rid + ".json")
+        try:
+            with open(path, encoding="utf-8") as handle:
+                same = json.load(handle) == marker
+        except (OSError, ValueError):
+            same = False
+        if not same:
+            try:
+                _write_json(path, marker)
+            except OSError:
+                logger.debug("phone-approvals: could not write clarify marker", exc_info=True)
+                continue
+        _clarify[rid] = (pending_dir, decisions_dir)
+    for rid in [r for r in _clarify if r not in open_now]:
+        p_dir, d_dir = _clarify.pop(rid)
+        _remove(os.path.join(p_dir, rid + ".json"))
+        _remove(os.path.join(d_dir, rid + ".json"))
+    return bool(open_now) or _clarify_watch[0] > 0
+
+
+def _on_human_input(kind="", **kwargs):
+    if kind != "clarify":
+        return
+    with _lock:
+        _clarify_watch[0] += 1
+    _ensure_worker()
+
+
+def _on_human_input_done(kind="", **kwargs):
+    if kind != "clarify":
+        return
+    with _lock:
+        _clarify_watch[0] = max(0, _clarify_watch[0] - 1)
+
+
 def register(ctx):
     ctx.register_hook("pre_approval_request", _on_request)
     ctx.register_hook("post_approval_response", _on_response)
+    ctx.register_hook("on_human_input_request", _on_human_input)
+    ctx.register_hook("on_human_input_resolved", _on_human_input_done)

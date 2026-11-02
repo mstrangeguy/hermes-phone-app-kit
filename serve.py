@@ -848,6 +848,146 @@ def serve_decide(client, lines, leftover):
         json_error(client, 400, "Bad Request", "bad_request", "Only Allow once or Deny can be sent from the phone")
 
 
+# --- Desktop questions (clarify) --------------------------------------------------
+# The same plugin reports an open clarify card (one to five questions, with or
+# without choices) under phone-approvals/clarify/, and applies the answers this
+# proxy writes there. An answer is what the person would have typed or picked
+# on the desktop, so it needs an unlocked app, not a fresh Face ID check.
+
+CLARIFY_PATH = "/phone-api/clarify/answer"
+CLARIFY_QID = re.compile(r"^q[0-9]{1,2}$")
+CLARIFY_TEXT_MAX = 2000
+CLARIFY_BODY_LIMIT = 32 * 1024
+RECOMMENDED = " (Recommended)"
+
+
+def desktop_questions(base=None):
+    """Open clarify cards reported by the plugin, oldest first. Each item has
+    kind "clarify" and its questions; a choice keeps the desktop's label."""
+    pending = os.path.join(base or APPROVALS_DIR, "clarify", "pending")
+    try:
+        names = os.listdir(pending)
+    except OSError:
+        return []
+    out = []
+    for name in names:
+        rid = name[:-5] if name.endswith(".json") else ""
+        if not REQUEST_ID.match(rid):
+            continue
+        try:
+            with open(os.path.join(pending, name), encoding="utf-8") as handle:
+                marker = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(marker, dict) or marker.get("request_id") != rid or marker.get("kind") != "clarify":
+            continue
+        if not SESSION_ID.match(str(marker.get("session_key") or "")) or not pid_alive(marker.get("pid")):
+            continue
+        answered = set(marker.get("answered") or [])
+        questions = []
+        for q in marker.get("questions") or []:
+            if not isinstance(q, dict) or not CLARIFY_QID.match(str(q.get("qid") or "")):
+                continue
+            choices = [str(c) for c in (q.get("choices") or []) if str(c).strip()][:12]
+            questions.append({
+                "qid": q["qid"],
+                "question": str(q.get("question") or "")[:CLARIFY_TEXT_MAX],
+                "choices": [c[:-len(RECOMMENDED)] if c.endswith(RECOMMENDED) else c for c in choices],
+                "recommended": next((i for i, c in enumerate(choices) if c.endswith(RECOMMENDED)), None),
+                "multi_select": bool(q.get("multi_select")),
+                "answered": q["qid"] in answered,
+            })
+        if not questions:
+            continue
+        out.append({"request_id": rid, "kind": "clarify", "session_key": marker["session_key"],
+                    "created": marker.get("created"), "questions": questions})
+    out.sort(key=lambda item: item.get("created") or 0)
+    return out
+
+
+def clean_answers(raw, questions):
+    """{qid: text | [texts] | None} for the open questions, or None if malformed."""
+    if not isinstance(raw, dict):
+        return None
+    out = {}
+    for q in questions:
+        if q.get("answered"):
+            continue  # answered on the desktop; the plugin keeps that answer
+        value = raw.get(q["qid"])
+        if value is None:
+            out[q["qid"]] = None
+        elif isinstance(value, str):
+            out[q["qid"]] = value.strip()[:CLARIFY_TEXT_MAX] or None
+        elif isinstance(value, list) and q["multi_select"] and all(isinstance(v, str) for v in value):
+            out[q["qid"]] = [v.strip()[:CLARIFY_TEXT_MAX] for v in value if v.strip()][:20] or None
+        else:
+            return None
+    if all(v is None for v in out.values()):
+        return None
+    return out
+
+
+def record_answers(request_id, raw, base=None):
+    """Write the phone's answers for the plugin. 202 written, 400 bad input,
+    404 not pending."""
+    if not REQUEST_ID.match(str(request_id or "")):
+        return 400
+    root = base or APPROVALS_DIR
+    item = next((q for q in desktop_questions(root) if q["request_id"] == request_id), None)
+    if item is None:
+        return 404
+    answers = clean_answers(raw, item["questions"])
+    if answers is None:
+        return 400
+    path = os.path.join(root, "clarify", "decisions", request_id + ".json")
+    tmp = "%s.tmp%d" % (path, os.getpid())
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump({"answers": answers, "at": time.time()}, handle)
+        os.replace(tmp, path)
+    except OSError:
+        return 404
+    return 202
+
+
+def questions_base(request_id):
+    for name in served_profiles():
+        base = profile_file(name, "phone-approvals", APPROVALS_DIR)
+        if any(item["request_id"] == request_id for item in desktop_questions(base)):
+            return base
+    return APPROVALS_DIR
+
+
+def serve_clarify(client, lines, leftover):
+    if key_refused(client, lines):
+        return
+    try:
+        _fields, _names, length, _chunked = header_map(lines)
+        if length is None or length > CLARIFY_BODY_LIMIT:
+            raise ValueError("body length")
+        body = bytearray(leftover or b"")
+        client.settimeout(10)
+        while len(body) < length:
+            chunk = client.recv(length - len(body))
+            if not chunk:
+                raise ValueError("short body")
+            body += chunk
+        data = json.loads(bytes(body[:length]).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        json_error(client, 400, "Bad Request", "bad_request", "Send JSON with request_id and answers")
+        return
+    data = data if isinstance(data, dict) else {}
+    status = record_answers(data.get("request_id"), data.get("answers"), questions_base(data.get("request_id")))
+    if status == 202:
+        log("question answered from the phone")  # never the answer itself
+        send_response(client, 202, "Accepted", '{"ok":true}', "application/json")
+    elif status == 404:
+        json_error(client, 409, "Conflict", "question_not_pending", "That question is no longer waiting")
+    else:
+        json_error(client, 400, "Bad Request", "bad_request", "Answer at least one question")
+
+
 def bearer_ok(lines):
     """The same API key the Hermes API checks, compared in constant time."""
     sent = ""
@@ -923,7 +1063,8 @@ def all_active(with_reads=True):
     profile is skipped."""
     active, approvals, reads, failed = {}, [], {}, False
     for name in served_profiles():
-        items = desktop_approvals(profile_file(name, "phone-approvals", APPROVALS_DIR))
+        folder = profile_file(name, "phone-approvals", APPROVALS_DIR)
+        items = desktop_approvals(folder) + desktop_questions(folder)
         for item in items:
             item["profile"] = name
         try:
@@ -2141,7 +2282,8 @@ AUTH_PREFIX = "/phone-api/auth/"
 # Answered here, not by Hermes: no key goes out for them.
 LOCAL_API = (BUSY_PATH, ACTIVE_PATH, DECIDE_PATH, PROFILES_PATH, META_PATH,
              CRON_PATH, CRON_RUNS_PATH, CRON_OUTPUT_PATH, UPLOAD_PATH, MEDIA_PATH,
-             REACTIONS_PATH, REACTIONS_UNSEEN_PATH, SEARCH_PATH, DESKTOP_SEND_PATH, STATUS_PATH) + PUSH_PATHS
+             REACTIONS_PATH, REACTIONS_UNSEEN_PATH, SEARCH_PATH, DESKTOP_SEND_PATH, STATUS_PATH,
+             CLARIFY_PATH) + PUSH_PATHS
 # Polls that must not keep a Face ID session awake.
 BACKGROUND = (BUSY_PATH, ACTIVE_PATH, PROFILES_PATH, META_PATH, STATUS_PATH)
 RUN_APPROVAL = re.compile(r"^/v1/runs/([A-Za-z0-9_.:-]{1,128})/approval$")
@@ -2340,6 +2482,9 @@ def handle_client(client, upstream_addr=UPSTREAM):
             return
         if local == DECIDE_PATH and method == "POST":
             serve_decide(client, lines, leftover)
+            return
+        if local == CLARIFY_PATH and method == "POST":
+            serve_clarify(client, lines, leftover)
             return
         # Not logged: reaction reads are polled, and a search query is chat text.
         if (local == REACTIONS_PATH and method in ("GET", "POST")) or (local == REACTIONS_UNSEEN_PATH and method == "POST"):
@@ -2572,11 +2717,13 @@ def check_desktop(config, approvals, alerted, now=None):
             # The page is on screen and already shows it; never alert for this one later.
             alerted.add(rid)
             continue
+        question = item.get("kind") == "clarify"
         push = push_alert(item.get("profile") or "default", item.get("session_key"),
-                          "Waiting for your approval on the desktop.")
-        if send_alert(config, "%s is waiting for your approval on the desktop." % APP_NAME, True, push):
+                          "Has a question for you." if question else "Waiting for your approval on the desktop.")
+        text = ("%s has a question for you." if question else "%s is waiting for your approval on the desktop.") % APP_NAME
+        if send_alert(config, text, True, push):
             alerted.add(rid)
-            log("alert sent: desktop approval")
+            log("alert sent: desktop %s" % ("question" if question else "approval"))
     alerted.intersection_update(open_ids)
 
 
@@ -2775,7 +2922,7 @@ def watch_runs():
                 known = None
             else:
                 if config.get("approvals_dir"):
-                    approvals = desktop_approvals(config["approvals_dir"])
+                    approvals = desktop_approvals(config["approvals_dir"]) + desktop_questions(config["approvals_dir"])
                 else:
                     approvals = all_active(with_reads=False)[1]
                 check_desktop(config, approvals, desktop_alerted)

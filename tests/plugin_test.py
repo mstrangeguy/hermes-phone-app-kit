@@ -24,6 +24,10 @@ with open(os.path.join(home, "config.yaml"), "w") as handle:
     handle.write("plugins:\n  enabled: [phone-approvals]\napprovals:\n  timeout: 6\n")
 os.environ["HOME"] = work
 os.environ["HERMES_HOME"] = home
+# A throwaway home is a new "data root" to Hermes: importing its desktop
+# gateway (section 8) would otherwise set up a fresh runtime for it and re-run
+# this test inside that, without Hermes's dependencies.
+os.environ["HERMES_DISABLE_LAZY_INSTALLS"] = "1"
 # Run as a desktop-style process even when launched from inside a Hermes turn:
 # an inherited HERMES_SESSION_PLATFORM=api_server makes the plugin (correctly)
 # skip every approval, and the test would fail for the wrong reason.
@@ -174,6 +178,79 @@ time.sleep(1.5)
 check("no marker for a phone-started run", not markers())
 approval.resolve_gateway_approval("sess-e", "deny")
 t5.join(5)
+
+# 8. Clarify questions, through Hermes's real clarify tool and desktop bridge
+# (tools.clarify_tool -> tui_gateway.server._clarify_block -> server_requests).
+from tools.clarify_tool import clarify_tool  # noqa: E402
+from tui_gateway import server as tui_server, server_requests  # noqa: E402
+
+cl_pending = os.path.join(base, "clarify", "pending")
+cl_decisions = os.path.join(base, "clarify", "decisions")
+emitted = []
+server_requests._emit = lambda event, sid, payload: emitted.append((event, sid, payload))
+server_requests._write = lambda frame: emitted.append(("frame", None, frame))  # no desktop on stdout here
+tui_server._sessions["sid-clar"] = {"session_key": "sess-clar"}
+
+
+def cl_markers():
+    try:
+        return [n for n in os.listdir(cl_pending) if n.endswith(".json")]
+    except OSError:
+        return []
+
+
+def ask(questions, out):
+    out["r"] = json.loads(clarify_tool(questions, callback=lambda qs: tui_server._clarify_block("sid-clar", qs)))
+
+
+out6 = {}
+t6 = threading.Thread(target=ask, args=([
+    {"question": "Which house?", "choices": ["Home", "Cabin"]},
+    {"question": "Which checks?", "choices": ["Locks", "Cameras", "Lights"], "multi_select": True},
+    {"question": "Anything else?"}], out6), daemon=True)
+t6.start()
+names = wait_for(cl_markers)
+check("clarify: marker written", len(names) == 1)
+with open(os.path.join(cl_pending, names[0]), encoding="utf-8") as handle:
+    marker = json.load(handle)
+check("clarify: marker names the session and the questions",
+      marker["session_key"] == "sess-clar" and marker["kind"] == "clarify"
+      and [q["qid"] for q in marker["questions"]] == ["q0", "q1", "q2"]
+      and marker["questions"][1]["multi_select"] is True and len(marker["questions"][0]["choices"]) >= 2)
+with open(os.path.join(cl_decisions, marker["request_id"] + ".json"), "w") as handle:
+    json.dump({"answers": {"q0": "Cabin", "q1": ["Locks", "Lights"], "q2": None}}, handle)
+t6.join(10)
+resp = (out6.get("r") or {}).get("responses") or []
+check("clarify: the phone's answers reach the agent",
+      out6.get("r", {}).get("outcome") == "submitted" and resp[0]["user_response"] == "Cabin"
+      and resp[1]["user_response"] == ["Locks", "Lights"] and resp[2]["status"] == "skipped")
+check("clarify: the desktop card is withdrawn", any(e[0] == "request.cancel" and e[2].get("reason") == "answered"
+                                                   for e in emitted))
+check("clarify: marker cleared after", wait_for(lambda: not cl_markers()))
+
+# An answer the desktop already locked is kept.
+out7 = {}
+t7 = threading.Thread(target=ask, args=([{"question": "A?", "choices": ["x", "y"]},
+                                         {"question": "B?", "choices": ["x", "y"]}], out7), daemon=True)
+t7.start()
+names = wait_for(cl_markers)
+rid = names[0][:-5] if names else ""
+server_requests.lock_answer(rid, "q0", "y")
+with open(os.path.join(cl_decisions, rid + ".json"), "w") as handle:
+    json.dump({"answers": {"q0": "x", "q1": "x"}}, handle)
+t7.join(10)
+resp = (out7.get("r") or {}).get("responses") or []
+check("clarify: desktop's locked answer kept, the rest from the phone",
+      len(resp) == 2 and resp[0]["user_response"] == "y" and resp[1]["user_response"] == "x")
+
+check("clarify: marker cleared after the mixed answer", wait_for(lambda: not cl_markers()))
+
+# A decision for a request that is not open makes no marker and answers nothing.
+with open(os.path.join(cl_decisions, "srq-000000000000.json"), "w") as handle:
+    json.dump({"answers": {"q0": "x"}}, handle)
+time.sleep(1.0)
+check("clarify: no marker for a request that is not open", not cl_markers())
+os.remove(os.path.join(cl_decisions, "srq-000000000000.json"))
 
 print("%d/%d passed" % (sum(results), len(results)))
 sys.exit(0 if all(results) else 1)
