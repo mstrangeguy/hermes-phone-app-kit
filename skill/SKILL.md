@@ -63,3 +63,8 @@ done
 - **One-tap buttons missing on a yes/no question:** expected when the message mentions a lock, alarm, thermostat, heating/cooling, garage, siren or camera, or asks an either/or or open question. The rule is `quickReplies` in `page/chatparts.js` (tested in `chat_test.py`).
 - **Approval prompt in a terminal `hermes` chat does not show on the phone:** expected. Hermes answers terminal prompts in that terminal; the plugin only sees desktop and messaging prompts.
 - **Desktop approval answered on the phone but nothing happened:** check `agent.log` for `phone-approvals:` lines and run `plugin_test.py`. If it fails after a Hermes update, disable the plugin until fixed; prompts then work only on the desktop.
+
+## Planned (not built)
+
+- **Live steps, Stop and guidance in Desktop-started chats on Hermes v0.22+.** `desktop_send.py` only admits the message; the page polls the session for the reply. The v0.22 gateway has `session.events.since` (replays a chat's live events to a reconnecting client) and `session.interrupt`, which a long-lived relay could use. Build it with the v0.22 upgrade; on v0.21 those chats still stream.
+- **A Hermes board card on the Status screen.** HA Watch (launchd) has no Reminders access, so the card would need a writer that does, such as a small Hermes cron job that adds its cards to the status file.
