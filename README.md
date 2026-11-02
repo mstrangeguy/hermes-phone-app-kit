@@ -99,6 +99,7 @@ Written by the installer. Edit it by hand to change alerts; the alerts block is 
 | `alerts.chat_id` | Telegram chat id. Empty means your Hermes home channel (`TELEGRAM_HOME_CHANNEL`, set with `/sethome`). |
 | `alerts.notify` | Home Assistant notify service, e.g. `mobile_app_my_iphone`. Uses `HASS_URL` and `HASS_TOKEN` from `.env`. |
 | `alerts.url` | Link opened from the alert. Web push needs it: the Mac's `https://` address for this app. |
+| `alerts.preview` | Web push only, optional. `true` puts the first sentence of a finished reply (up to 140 characters, as plain text) in the alert instead of "Reply finished." It shows on the lock screen unless iPhone Settings → Notifications → (this app) → Show Previews is set to When Unlocked. Default off. Telegram and Home Assistant alerts stay generic. |
 | `alerts.subject` | Web push only, optional. The contact Apple sees for this sender, `mailto:` or `https:`. Default: the origin of `alerts.url`. Apple refuses made-up contacts (`localhost`, `.invalid`). |
 
 Telegram and Home Assistant alerts are generic, for example "Hermes is waiting for your approval." No commands, file names or chat text are sent through them.
@@ -136,6 +137,7 @@ cd ~/.hermes/phone-chat
 launchctl kickstart -k gui/$(id -u)/com.hermes.phone-chat     # restart the proxy
 tail -f serve.log                                              # proxy log (no keys or logins are logged)
 scripts/py -I serve.py --notify "test"                        # send a test alert
+scripts/py -I serve.py --notify "body" --title "T" --urgent   # same, with a title; another local monitor can use this as its backup channel
 scripts/update-check.sh --force                               # run every test now
 git pull && launchctl kickstart -k gui/$(id -u)/com.hermes.phone-chat   # update
 ```

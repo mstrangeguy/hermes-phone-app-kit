@@ -215,6 +215,33 @@ check("--notify refuses no text", bad_notify(["--urgent"]) and bad_notify(["  "]
 check("--notify refuses a stray argument", bad_notify(["a", "b"]) and bad_notify(["a", "--title"]))
 check("--notify clips long text", len(serve.notify_args(["x" * 900])[0]) == 400)
 
+# alerts.preview: the reply's first sentence, as plain text.
+check("preview: first sentence", serve.preview_text("Done. The rest is detail.") == "Done.")
+check("preview: markdown stripped",
+      serve.preview_text("**Kia is back.** See [the log](https://x/y).") == "Kia is back.")
+check("preview: code and media skipped",
+      serve.preview_text("```\nsecret()\n```\nMEDIA:/tmp/a.png\nAll set now.") == "All set now.")
+check("preview: version numbers do not split", serve.preview_text("Updated to 9.3.0 tonight.") == "Updated to 9.3.0 tonight.")
+long = serve.preview_text("word " * 80)
+check("preview: clipped on a word with an ellipsis", len(long) <= serve.PREVIEW_MAX and long.endswith("\u2026"))
+check("preview: control marker only -> empty (generic alert)", serve.preview_text("[SILENT]") == "")
+check("preview: list markers dropped", serve.preview_text("- First item done\n- second") == "First item done second")
+check("preview: empty stays empty", serve.preview_text("  \n```\nx\n```") == "")
+pdb = os.path.join(work, "preview_state.db")
+pc = sqlite3.connect(pdb)
+pc.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT)")
+pc.executemany("INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)",
+               [("s_prev", "assistant", "Old answer."), ("s_prev", "user", "next?"),
+                ("s_prev", "assistant", "New answer here. More."), ("s_prev", "assistant", ""),
+                ("s_prev", "tool", "tool text.")])
+pc.commit()
+pc.close()
+saved_db = serve.STATE_DB
+serve.STATE_DB = pdb
+check("preview: latest non-empty assistant reply", serve.reply_preview("default", "s_prev") == "New answer here.")
+check("preview: unknown session", serve.reply_preview("default", "nope") == "")
+serve.STATE_DB = saved_db
+
 log = open(serve.LOG_PATH).read() if os.path.exists(serve.LOG_PATH) else ""
 check("tokens never logged", "fake-token" not in log and "fake-bot-token" not in log)
 

@@ -2383,6 +2383,56 @@ def session_title(profile, session_id):
     return ""
 
 
+PREVIEW_MAX = 140
+_MD_CODE = re.compile(r"```.*?(```|$)", re.S)
+_MD_LINK = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
+_MD_MARKS = re.compile(r"[*_`~#>|]+")
+_MD_BULLET = re.compile(r"^(?:[-*+]|\d+[.)])\s+")
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9\"'(])")
+
+
+def preview_text(content):
+    """The reply's first sentence as plain text, at most PREVIEW_MAX characters."""
+    text = _MD_CODE.sub(" ", str(content or ""))
+    lines = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith(("MEDIA:", "::", "@image:", "@file:")) or set(line) <= set("|-: "):
+            continue
+        if re.fullmatch(r"\[[A-Z_]+\]", line):  # control markers such as [SILENT]
+            continue
+        lines.append(_MD_BULLET.sub("", line))
+    text = _MD_MARKS.sub("", _MD_LINK.sub(r"\1", " ".join(lines)))
+    text = " ".join(text.split())
+    if not text:
+        return ""
+    first = _SENTENCE_END.split(text, 1)[0]
+    if len(first) > PREVIEW_MAX:
+        first = first[:PREVIEW_MAX - 1].rsplit(" ", 1)[0].rstrip(",;:") + "\u2026"
+    return first
+
+
+def reply_preview(profile, session_id):
+    """First sentence of the session's latest assistant reply (read-only), or ""."""
+    if not SESSION_ID.match(str(session_id or "")):
+        return ""
+    path = profile_file(profile, "state.db", STATE_DB)
+    if not os.path.exists(path):
+        return ""
+    try:
+        conn = ro_connect(path)
+        try:
+            row = conn.execute(
+                "SELECT content FROM messages WHERE session_id = ? AND role = 'assistant' "
+                "AND content IS NOT NULL AND TRIM(content) != '' ORDER BY id DESC LIMIT 1",
+                (session_id,)).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return ""
+    return preview_text(row[0]) if row else ""
+
+
 def push_alert(profile, session_id, body):
     """What a web push shows: the session title, a short line, and the link."""
     return {"title": session_title(profile, session_id) or APP_NAME, "body": body,
@@ -2584,8 +2634,11 @@ def check_runs(config, runs, known, alerted):
             if now == "cancelled" or watching(run_id):
                 continue
             text = ("%s finished your reply." if now == "completed" else "%s could not finish your reply.") % APP_NAME
-            push = push_alert(status.get("_profile"), status.get("session_id"),
-                              "Reply finished." if now == "completed" else "Could not finish the reply.")
+            body = "Reply finished." if now == "completed" else "Could not finish the reply."
+            if now == "completed" and config.get("preview") is True:
+                # Web push only: Telegram and Home Assistant alerts stay generic.
+                body = reply_preview(status.get("_profile"), status.get("session_id")) or body
+            push = push_alert(status.get("_profile"), status.get("session_id"), body)
             if send_alert(config, text, False, push):
                 log("alert sent: %s" % now)
     for run_id in [r for r in known if r not in runs]:
