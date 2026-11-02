@@ -222,8 +222,10 @@ STATIC = {
     "/vendor/purify.min.js": ("page/vendor/purify.min.js", "text/javascript; charset=utf-8"),
     "/manifest.webmanifest": ("page/manifest.webmanifest", "application/manifest+json"),
     "/icon-180.png": ("page/icon-180.png", "image/png"),
-    # Only for browsers without Declarative Web Push; iOS 18.4+ needs no worker.
+    # The worker: the offline page on every browser, push on browsers without
+    # Declarative Web Push. offline.html is what it shows when the Mac is unreachable.
     "/sw.js": ("page/sw.js", "text/javascript; charset=utf-8"),
+    "/offline.html": ("page/offline.html", "text/html; charset=utf-8"),
     "/theme.css": (None, "text/css; charset=utf-8"),
 }
 

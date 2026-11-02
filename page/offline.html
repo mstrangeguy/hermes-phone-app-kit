@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0d1117">
+<title>Hermes</title>
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="theme.css">
+</head>
+<body>
+<!-- Shown by sw.js when the Mac cannot be reached. Kept on the phone; holds no
+     chat text, no key and no script. -->
+<div class="offline">
+  <img class="offline-icon" src="icon-180.png" alt="" width="64" height="64">
+  <h1>Can't reach the Mac</h1>
+  <p>Check that Tailscale is connected on this iPhone. Open the Tailscale app and turn it on, then try again.</p>
+  <p class="offline-more">If Tailscale is connected, the Mac may be asleep or off, or the phone app's server on it has stopped. Replies already running on the Mac keep going.</p>
+  <a class="textbtn primary offline-retry" href="./">Try again</a>
+</div>
+</body>
+</html>

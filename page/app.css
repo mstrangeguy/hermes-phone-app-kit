@@ -817,3 +817,15 @@ button.bucket.group::after { order: 3; }
 .todo.cancelled .todo-text { color: var(--muted-fg); text-decoration: line-through; }
 .step-body .todo-list { padding: 4px 2px; }
 @media (prefers-reduced-motion: reduce) { .todo.in_progress .todo-mark { animation: none; } .plan-fill { transition: none; } }
+
+/* offline.html: shown by sw.js when the Mac cannot be reached. */
+.offline {
+  box-sizing: border-box; min-height: 100%; display: flex; flex-direction: column; justify-content: center;
+  padding: max(24px, env(safe-area-inset-top)) 24px max(24px, env(safe-area-inset-bottom)); max-width: 520px; margin: 0 auto;
+}
+.offline-icon { border-radius: 14px; margin-bottom: 16px; }
+.offline h1 { color: var(--fg); font-size: 26px; letter-spacing: -0.03em; margin: 0 0 10px; }
+.offline p { margin: 0 0 14px; line-height: 1.45; }
+.offline .offline-more { color: var(--muted-fg); font-size: 15px; }
+.offline-retry { display: inline-flex; align-items: center; justify-content: center; align-self: flex-start;
+  text-decoration: none; min-height: 44px; padding: 0 18px; margin-top: 6px; }

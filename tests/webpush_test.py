@@ -383,6 +383,10 @@ check("active poll records the page's unread count", status == 200 and serve._ba
 status, body, headers = call("GET", "/sw.js", key=None)
 check("sw.js served as JavaScript", status == 200 and headers.get("Content-Type", "").startswith("text/javascript")
       and b"notificationclick" in body)
+status, body, headers = call("GET", "/offline.html", key=None)
+check("offline.html served as HTML, no script, no chat",
+      status == 200 and headers.get("Content-Type", "").startswith("text/html")
+      and b"<script" not in body and b"Can't reach the Mac" in body)
 status, body, headers = call("GET", "/", key=None)
 check("CSP allows only this origin's worker", "worker-src 'self'" in headers.get("Content-Security-Policy", ""))
 log = "\n".join(logged)

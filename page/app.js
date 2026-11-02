@@ -1706,6 +1706,10 @@ function setBadge(count) {
 $("push-btn").addEventListener("click", pushToggle);
 $("push-test").addEventListener("click", pushTest);
 if ("serviceWorker" in navigator) {
+  // sw.js keeps the "Can't reach the Mac" page for when this phone cannot
+  // reach the Mac. It never holds the app's scripts or any chat. Registered on
+  // every load (a no-op once installed); a failure only means no offline page.
+  navigator.serviceWorker.register("sw.js", { scope: "./" }).catch(() => {});
   // sw.js (older browsers) hands a tapped notification to an open page.
   navigator.serviceWorker.addEventListener("message", (event) => {
     const data = event.data || {};
