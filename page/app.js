@@ -5319,7 +5319,8 @@ document.addEventListener("pointerdown", (event) => {
 // message box with progress and the step in hand; tap it for the whole list.
 // It shows while a reply runs (here or on the desktop), then stays, folded,
 // for that turn's list until you close it or send the next message.
-const PLAN = { sessionId: null, todos: null, rowId: 0, floor: 0, open: false, sig: "", timer: 0 };
+const PLAN = { sessionId: null, todos: null, rowId: 0, floor: 0, open: false, sig: "", timer: 0,
+  doneIds: null, shownPct: null, pctFrame: 0 };
 // How the last phone-started reply ended, per session ("failed" / "stopped"),
 // for the card's red state. A new task-list write clears it.
 const PLAN_OUTCOME = {};
@@ -5337,7 +5338,34 @@ function resetPlan(id) {
   PLAN.floor = 0;
   PLAN.open = false;
   PLAN.sig = "";
+  PLAN.doneIds = null;
+  PLAN.shownPct = null;
   paintPlan();
+}
+
+// The card's % counts to its new value over the same second as the fill.
+function planReducedMotion() {
+  return Boolean(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+}
+
+function countPlanPct(node, target) {
+  cancelAnimationFrame(PLAN.pctFrame);
+  const from = PLAN.shownPct;
+  if (from == null || from === target || planReducedMotion() || !window.requestAnimationFrame) {
+    PLAN.shownPct = target;
+    node.textContent = target + "%";
+    return;
+  }
+  const start = performance.now();
+  const tick = (now) => {
+    const k = Math.min(1, (now - start) / 1000);
+    const eased = k < 0.5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2;
+    PLAN.shownPct = Math.round(from + (target - from) * eased);
+    node.textContent = PLAN.shownPct + "%";
+    if (k < 1) PLAN.pctFrame = requestAnimationFrame(tick);
+  };
+  node.textContent = from + "%";
+  PLAN.pctFrame = requestAnimationFrame(tick);
 }
 
 function planFrom(rows) {
@@ -5448,11 +5476,12 @@ function paintPlan() {
   // Weighted %, with the step count beside it.
   const count = document.createElement("span");
   count.className = "plan-count";
-  count.textContent = prog.percent + "%";
+  const pct = document.createElement("span");
+  countPlanPct(pct, prog.percent);
   const sub = document.createElement("span");
   sub.className = "plan-sub";
   sub.textContent = prog.done + "/" + prog.total;
-  count.append(sub);
+  count.append(pct, sub);
   const now = document.createElement("span");
   now.className = "plan-now";
   const tag = { failed: "Failed", stopped: "Stopped", waiting: "Waiting on you" }[tone];
@@ -5471,12 +5500,17 @@ function paintPlan() {
   });
   // One segment per step, as wide as its weight: done solid, running striped,
   // the step it stopped or waits on outlined, the rest grey.
+  // A step that just finished fills left to right over 1 s; the running step's
+  // stripes scroll left to right (app.css).
+  const fresh = new Set(PhoneParts.freshlyDone(PLAN.doneIds, PLAN.todos));
+  PLAN.doneIds = PLAN.todos.filter((t) => t.status === "completed").map((t) => t.id);
   const bar = document.createElement("div");
   bar.className = "plan-bar";
   for (const [todo] of PhoneParts.todoTree(PLAN.todos)) {
     if (todo.status === "cancelled") continue;
     const seg = document.createElement("span");
     seg.className = "plan-seg " + todo.status;
+    if (fresh.has(todo.id)) seg.classList.add("fresh");
     if (todo.status === "in_progress" && (tone === "failed" || tone === "stopped" || tone === "waiting")) seg.classList.add("halt");
     seg.style.flexGrow = String(PhoneParts.todoWeight(todo));
     bar.append(seg);

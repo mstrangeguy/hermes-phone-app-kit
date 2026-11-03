@@ -354,6 +354,9 @@ ok("tone: running, idle, red, yellow, green", P.todoTone(job(2, 2), null, true) 
   P.todoTone(job(2, 2), null, false) === "idle" && P.todoTone(job(2, 2), "stopped", false) === "stopped" &&
   P.todoTone(job(2, 2), "failed", false) === "failed" && P.todoTone(wjob, null, true) === "waiting" &&
   P.todoTone(job(8, -1), "stopped", false) === "done");
+ok("fill: nothing animates on a list's first paint", P.freshlyDone(null, job(3, 3)).length === 0);
+ok("fill: only steps that just turned completed", P.freshlyDone(["s0", "s1"], job(3, 3)).join() === "s2" &&
+  P.freshlyDone(["s0", "s1", "s2"], job(3, 3)).length === 0 && P.freshlyDone([], job(2, 2)).join() === "s0,s1");
 ok("tone: run endings", P.runOutcome("run.failed") === "failed" && P.runOutcome("run.cancelled") === "stopped" &&
   P.runOutcome("run.interrupted") === "stopped" && P.runOutcome("run.completed") === null);
 

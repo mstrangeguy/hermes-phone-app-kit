@@ -111,6 +111,19 @@
     return working ? "running" : "idle";
   }
 
+  // Steps that turned completed since the last paint (they get the 1 s fill).
+  // prevDone is the list of completed ids last painted, or null on the first
+  // paint of a list, when nothing animates.
+  function freshlyDone(prevDone, todos) {
+    const out = [];
+    if (!Array.isArray(prevDone)) return out;
+    const before = new Set(prevDone);
+    for (const t of Array.isArray(todos) ? todos : []) {
+      if (t.status === "completed" && !before.has(t.id)) out.push(t.id);
+    }
+    return out;
+  }
+
   // How a phone-run ending maps to the card: failed is red Failed; a Stop or
   // an interruption is red Stopped; a finished reply clears it.
   function runOutcome(eventName) {
@@ -287,7 +300,7 @@
   }
 
   root.PhoneParts = {
-    TODO_TOOLS, isTodoTool, parseTodos, todoTree, todoProgress, todoWeight, todoTone, runOutcome,
+    TODO_TOOLS, isTodoTool, parseTodos, todoTree, todoProgress, todoWeight, todoTone, runOutcome, freshlyDone,
     latestTodos, planVisible,
     QUICK_REACTIONS, applyReaction, mine, tapDetector, searchRows,
     gatewayRoute, coreText, gatewayProgress, gatewayStep,

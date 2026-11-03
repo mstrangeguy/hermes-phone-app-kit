@@ -819,19 +819,27 @@ button.bucket.group::after { order: 3; }
 .plan-close { appearance: none; flex: none; width: 36px; height: 36px; border: 0; background: none; color: var(--muted-fg); font-size: 18px; }
 /* Weighted progress: one segment per step, flex-grow = its weight. */
 .plan-bar { display: flex; gap: 2px; padding: 0 10px 8px; }
-.plan-seg { flex: 1 1 0; height: 5px; min-width: 3px; border-radius: 2px; background: color-mix(in srgb, var(--border) 85%, transparent); }
-.plan-seg.completed { background: var(--primary); }
-.plan-seg.in_progress { background: repeating-linear-gradient(45deg, color-mix(in srgb, var(--primary) 60%, transparent) 0 4px, color-mix(in srgb, var(--primary) 25%, transparent) 4px 8px); }
+.plan-seg { position: relative; overflow: hidden; flex: 1 1 0; height: 5px; min-width: 3px; border-radius: 2px; background: color-mix(in srgb, var(--border) 85%, transparent); }
+.plan-seg.completed { background: var(--seg, var(--primary)); }
+.plan-seg.in_progress { background: repeating-linear-gradient(45deg, color-mix(in srgb, var(--primary) 60%, transparent) 0 4px, color-mix(in srgb, var(--primary) 25%, transparent) 4px 8px);
+  background-size: 11.31px 11.31px; animation: plan-march 0.8s linear infinite; }
+@keyframes plan-march { from { background-position: 0 0; } to { background-position: 11.31px 0; } }
+/* A step that just finished: grey base, colour fills in left to right over 1 s. */
+.plan-seg.halt { animation: none; }
+.plan-seg.completed.fresh { background: color-mix(in srgb, var(--border) 85%, transparent); }
+.plan-seg.completed.fresh::after { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 100%; border-radius: 2px;
+  background: var(--seg, var(--primary)); animation: plan-fill 1s cubic-bezier(0.45, 0, 0.25, 1) both; }
+@keyframes plan-fill { from { width: 0; } to { width: 100%; } }
+.plan.done { --seg: #3fb950; }
+.plan.tone-failed, .plan.tone-stopped { --seg: #f85149; }
+.plan.tone-waiting { --seg: #e3c03a; }
 .plan-sub { margin-left: 4px; font-size: 11.5px; font-weight: 400; color: var(--muted-fg); }
-.plan.done .plan-seg.completed { background: #3fb950; }
 .plan.done .plan-count { color: #3fb950; }
 .plan.tone-failed, .plan.tone-stopped { border-color: color-mix(in srgb, #f85149 60%, var(--border)); }
 .plan.tone-failed .plan-ico, .plan.tone-stopped .plan-ico, .plan.tone-failed .plan-count, .plan.tone-stopped .plan-count { color: #f85149; }
-.plan.tone-failed .plan-seg.completed, .plan.tone-stopped .plan-seg.completed { background: #f85149; }
 .plan.tone-failed .plan-seg.halt, .plan.tone-stopped .plan-seg.halt { background: color-mix(in srgb, #f85149 30%, transparent); box-shadow: inset 0 0 0 1px #f85149; }
 .plan.tone-waiting { border-color: color-mix(in srgb, #e3c03a 60%, var(--border)); }
 .plan.tone-waiting .plan-ico, .plan.tone-waiting .plan-count { color: #e3c03a; }
-.plan.tone-waiting .plan-seg.completed { background: #e3c03a; }
 .plan.tone-waiting .plan-seg.halt { background: color-mix(in srgb, #e3c03a 25%, transparent); box-shadow: inset 0 0 0 1px #e3c03a; }
 .todo.in_progress.halt-failed .todo-mark, .todo.in_progress.halt-stopped .todo-mark { color: #f85149; animation: none; }
 .todo.in_progress.halt-waiting .todo-mark { color: #e3c03a; animation: none; }
@@ -845,7 +853,7 @@ button.bucket.group::after { order: 3; }
 .todo.completed .todo-text { color: var(--muted-fg); }
 .todo.cancelled .todo-text { color: var(--muted-fg); text-decoration: line-through; }
 .step-body .todo-list { padding: 4px 2px; }
-@media (prefers-reduced-motion: reduce) { .todo.in_progress .todo-mark { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .todo.in_progress .todo-mark, .plan-seg.in_progress, .plan-seg.completed.fresh::after { animation: none; } }
 
 /* offline.html: shown by sw.js when the Mac cannot be reached. */
 .offline {
