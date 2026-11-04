@@ -389,8 +389,19 @@
     return { over: true, clamped: !open, button: open ? "Show less" : "Show all" };
   }
 
+  // Copy, from the double-tap bar: the whole message, folded or not. Your own
+  // message as it shows (picture and file lines are not words you typed:
+  // shown is the bubble's text); a reply as Hermes wrote it, in Markdown, as
+  // the desktop's copy button does. "" when there is nothing to copy.
+  function copyText(message, shown) {
+    if (!message || typeof message !== "object") return "";
+    if (message.role === "user") return String(typeof shown === "string" ? shown : rowText(message.content)).trim();
+    if (message.role === "assistant") return rowText(message.content).trim();
+    return "";
+  }
+
   root.PhoneParts = {
-    CLAMP_LINES, clampState,
+    CLAMP_LINES, clampState, copyText,
     TODO_TOOLS, isTodoTool, parseTodos, todoTree, todoProgress, todoWeight, todoTone, runOutcome, freshlyDone,
     latestTodos, planVisible, planState, waitedOnId, stepName, segLook, rowHalt,
     QUICK_REACTIONS, applyReaction, mine, tapDetector, searchRows,

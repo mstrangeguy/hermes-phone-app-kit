@@ -800,6 +800,15 @@ button.bucket.group::after { order: 3; }
 }
 .tap-emoji { appearance: none; border: 0; background: none; font-size: 24px; line-height: 1; width: 42px; height: 42px; border-radius: 50%; }
 .tap-emoji.on { background: color-mix(in srgb, var(--primary) 35%, transparent); }
+/* Copy sits after the reactions (alone when reactions are off). */
+.tap-copy {
+  appearance: none; border: 0; border-radius: 999px; background: none; color: var(--fg);
+  font-size: 15px; font-weight: 600; min-width: 64px; height: 42px; padding: 0 12px;
+}
+.tap-emoji + .tap-copy { border-left: 1px solid var(--border); border-radius: 0 999px 999px 0; margin-left: 2px; }
+.tap-copy:active { background: var(--muted); }
+.tap-copy.done { color: var(--primary); }
+.copy-scratch { position: fixed; top: 0; left: -9999px; width: 1px; height: 1px; opacity: 0; font-size: 16px; }
 .tap-emoji:active { transform: scale(1.18); }
 @keyframes tapback-in { from { opacity: 0; transform: translateY(4px) scale(0.96); } }
 @media (prefers-reduced-motion: reduce) { .tapback { animation: none; } }

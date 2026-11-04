@@ -5321,15 +5321,14 @@ function closeTapback() {
 
 function openTapback(node, tapY) {
   closeTapback();
-  if (!REACT.enabled) return;
   const rowId = Number(node.dataset.row);
   const current = PhoneParts.mine(REACT.map.get(rowId));
   const bar = document.createElement("div");
   bar.id = "tapback";
   bar.className = "tapback";
   bar.setAttribute("role", "toolbar");
-  bar.setAttribute("aria-label", "React to this message");
-  for (const emoji of PhoneParts.QUICK_REACTIONS) {
+  bar.setAttribute("aria-label", REACT.enabled ? "React to or copy this message" : "Copy this message");
+  for (const emoji of REACT.enabled ? PhoneParts.QUICK_REACTIONS : []) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "tap-emoji" + (emoji === current ? " on" : "");
@@ -5341,6 +5340,7 @@ function openTapback(node, tapY) {
     });
     bar.append(button);
   }
+  bar.append(copyButton(node, rowId));
   bar.dataset.top = String($("transcript").scrollTop);
   document.body.append(bar);
   node.classList.add("tapped");
@@ -5358,6 +5358,54 @@ function openTapback(node, tapY) {
   left = Math.max(8, Math.min(left, window.innerWidth - width - 8));
   bar.style.top = Math.round(top) + "px";
   bar.style.left = Math.round(left) + "px";
+}
+
+// Copy the whole message, even a folded one: iOS offers no Select All on a
+// page, and dragging handles through a long message is slow.
+function copyButton(node, rowId) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "tap-copy";
+  button.textContent = "Copy";
+  button.addEventListener("click", () => {
+    const message = state.messages.find((m) => m && m.id === rowId);
+    const words = node.querySelector(".bubble-text");
+    const text = PhoneParts.copyText(message, words ? words.textContent : undefined);
+    copyToClipboard(text).then((done) => {
+      if (!done) {
+        closeTapback();
+        notice("Could not copy. Long-press the text to select it instead.");
+        return;
+      }
+      button.textContent = "Copied";
+      button.classList.add("done");
+      setTimeout(() => { if (button.isConnected) closeTapback(); }, 700);
+    });
+  });
+  return button;
+}
+
+// Must start inside the tap: iOS allows the clipboard only from a user gesture.
+function copyToClipboard(text) {
+  if (!text) return Promise.resolve(false);
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+    return navigator.clipboard.writeText(text).then(() => true, () => legacyCopy(text));
+  }
+  return Promise.resolve(legacyCopy(text));
+}
+
+function legacyCopy(text) {
+  const box = document.createElement("textarea");
+  box.value = text;
+  box.readOnly = true;
+  box.className = "copy-scratch";
+  document.body.append(box);
+  box.select();
+  box.setSelectionRange(0, text.length);
+  let done = false;
+  try { done = document.execCommand("copy"); } catch (e) { done = false; }
+  box.remove();
+  return done;
 }
 
 async function setReaction(rowId, emoji) {
@@ -5412,7 +5460,7 @@ $("transcript").addEventListener("pointerup", (event) => {
   const node = target.closest("[data-row]");
   if (!node || target.closest("a, button, input, textarea, select, pre, summary, img, .step, .reacts")) return;
   if (!TAP(event.clientX, event.clientY, event.timeStamp)) return;
-  if (!REACT.enabled) return;
+  // With reactions off, the bar still opens, with Copy only.
   // A double tap on text may also select a word; the tapback is what was meant.
   if (window.getSelection) window.getSelection().removeAllRanges();
   openTapback(node, event.clientY);

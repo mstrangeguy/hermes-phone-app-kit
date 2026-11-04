@@ -8,7 +8,7 @@ gate, bad input), the once-only "[The user reacted ...]" notes, and
 /phone-api/search (titles, message text, compression tips, hidden chats,
 wildcards, read-only). In node: page/chatparts.js (task-list parsing, tree,
 progress, when the card shows; reaction toggling; double tap; search filter;
-when a long message you sent folds).
+when a long message you sent folds; what Copy copies).
 And that the page loads chatparts.js and wires the new pieces.
 """
 import hashlib
@@ -493,6 +493,14 @@ ok("fold: opened shows Show less", fold(300 * LH, LH, true) === J({ over: true, 
 ok("fold: zero, negative or missing line height never folds",
   [0, -5, NaN, undefined, null, "normal", Infinity].every((bad) => fold(300 * LH, bad, false) === flat));
 ok("fold: zero or missing height never folds", [0, -1, NaN, undefined].every((bad) => fold(bad, LH, false) === flat));
+const longMine = "Line one\n" + "made-up line\n".repeat(300) + "last line";
+ok("copy: your own message copies whole, as shown (even folded)",
+  P.copyText({ role: "user", content: longMine + "\n@image:/x/made-up.png" }, longMine) === longMine);
+ok("copy: without the shown text, the saved text", P.copyText({ role: "user", content: [{ type: "text", text: " hi " }] }) === "hi");
+ok("copy: a reply copies as written, Markdown kept", P.copyText({ role: "assistant", content: "**Done.**\n\n- one\n- two" }) === "**Done.**\n\n- one\n- two");
+ok("copy: tool rows, empty rows and junk give nothing",
+  P.copyText({ role: "tool", content: "x" }) === "" && P.copyText({ role: "assistant", content: "  " }) === "" &&
+  P.copyText(null) === "" && P.copyText("text") === "");
 ok("fold: bad line count falls back to 4", J(P.clampState(5 * LH, LH, 0, false)) === J(P.clampState(5 * LH, LH, 4, false)) &&
   J(P.clampState(3 * LH, LH, NaN, false)) === flat);
 process.stdout.write(JSON.stringify(out));
@@ -588,6 +596,21 @@ check("fold: the button is not part of the double tap (buttons skipped)",
 check("fold: only the text folds, the whole text stays in the page",
       "words.textContent = shown;" in app and "words.after(button)" in app and ".bubble-text.clamped" in css and
       ".bubble.clamped" not in css)
+tap_src = app.split("function openTapback(node, tapY) {")[1].split("\n}\n")[0] if "function openTapback(node, tapY) {" in app else ""
+check("copy: the double-tap bar has Copy, after the reactions",
+      "bar.append(copyButton(node, rowId));" in tap_src and
+      tap_src.index("PhoneParts.QUICK_REACTIONS") < tap_src.index("copyButton(node, rowId)"))
+check("copy: the bar opens with reactions off too (Copy only)",
+      "if (!REACT.enabled) return;" not in tap_src and "REACT.enabled ? PhoneParts.QUICK_REACTIONS : []" in tap_src and
+      not re.search(r"if \(!TAP\([^\n]*\n  if \(!REACT\.enabled\) return;", app))
+copy_src = app.split("function copyButton(node, rowId) {")[1].split("\n}\n")[0] if "function copyButton(node, rowId) {" in app else ""
+check("copy: copies the whole message (bubble text, not what is folded) via PhoneParts.copyText",
+      'node.querySelector(".bubble-text")' in copy_src and "words.textContent" in copy_src and
+      "PhoneParts.copyText(message, words ? words.textContent : undefined)" in copy_src)
+check("copy: clipboard write starts inside the tap (no await first), with a fallback and Copied feedback",
+      "await" not in copy_src and "copyToClipboard(text)" in copy_src and "navigator.clipboard.writeText(text)" in app and
+      'document.execCommand("copy")' in app and 'button.textContent = "Copied"' in copy_src)
+check("copy: styled, scratch box off screen", ".tap-copy {" in css and ".copy-scratch {" in css and "left: -9999px" in css)
 check("new endpoints are local, not forwarded",
       all(p in serve.LOCAL_API for p in (serve.REACTIONS_PATH, serve.REACTIONS_UNSEEN_PATH, serve.SEARCH_PATH)))
 

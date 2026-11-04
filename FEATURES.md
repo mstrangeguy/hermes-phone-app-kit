@@ -30,8 +30,9 @@ Store app and no cloud service. Setup and settings: [README.md](README.md).
 - **One-tap answers.** When Hermes asks a plain yes/no question, **Yes, go ahead** and **Not
   now** buttons appear. Never shown for locks, the alarm, the thermostat, the garage, a siren or
   a camera.
-- **Reactions.** Double-tap a message for the six Tapbacks. Shared with the desktop app, and
-  passed to Hermes with your next message.
+- **Reactions and Copy.** Double-tap a message for the six Tapbacks. Shared with the desktop app,
+  and passed to Hermes with your next message. **Copy** in the same bar copies the whole message,
+  even a folded one (iOS has no Select All on a page).
 - **Long messages fold.** Long messages you sent fold to a few lines with **Show all**, like the
   desktop's.
 - **Send into Desktop chats** (Hermes v0.22+). Text and pictures go into any chat; the reply
