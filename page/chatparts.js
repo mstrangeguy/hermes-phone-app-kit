@@ -373,7 +373,24 @@
     return null;
   }
 
+  // Long messages you sent fold to a few lines, like the desktop's user
+  // bubbles (styles.css .sticky-human-clamp: 4 lines and a bottom fade).
+  // fullHeight: the text's whole height (scrollHeight); lineHeight: its line
+  // height in px. A message that fits gets no fold and no button. Bad sizes
+  // never fold: a broken measure must not hide a message.
+  const CLAMP_LINES = 4;
+  const CLAMP_SLACK = 0.5;  // scrollHeight is a rounded whole pixel
+
+  function clampState(fullHeight, lineHeight, maxLines, open) {
+    const lines = Number.isFinite(maxLines) && maxLines >= 1 ? Math.floor(maxLines) : CLAMP_LINES;
+    const ok = Number.isFinite(fullHeight) && fullHeight > 0 && Number.isFinite(lineHeight) && lineHeight > 0;
+    const over = ok && fullHeight > lineHeight * lines + CLAMP_SLACK;
+    if (!over) return { over: false, clamped: false, button: "" };
+    return { over: true, clamped: !open, button: open ? "Show less" : "Show all" };
+  }
+
   root.PhoneParts = {
+    CLAMP_LINES, clampState,
     TODO_TOOLS, isTodoTool, parseTodos, todoTree, todoProgress, todoWeight, todoTone, runOutcome, freshlyDone,
     latestTodos, planVisible, planState, waitedOnId, stepName, segLook, rowHalt,
     QUICK_REACTIONS, applyReaction, mine, tapDetector, searchRows,

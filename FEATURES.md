@@ -32,6 +32,8 @@ Store app and no cloud service. Setup and settings: [README.md](README.md).
   a camera.
 - **Reactions.** Double-tap a message for the six Tapbacks. Shared with the desktop app, and
   passed to Hermes with your next message.
+- **Long messages fold.** Long messages you sent fold to a few lines with **Show all**, like the
+  desktop's.
 - **Send into Desktop chats** (Hermes v0.22+). Text and pictures go into any chat; the reply
   appears when Hermes saves it.
 

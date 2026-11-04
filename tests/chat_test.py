@@ -7,7 +7,8 @@ Covers, against a throwaway Hermes home: /phone-api/reactions read and set
 gate, bad input), the once-only "[The user reacted ...]" notes, and
 /phone-api/search (titles, message text, compression tips, hidden chats,
 wildcards, read-only). In node: page/chatparts.js (task-list parsing, tree,
-progress, when the card shows; reaction toggling; double tap; search filter).
+progress, when the card shows; reaction toggling; double tap; search filter;
+when a long message you sent folds).
 And that the page loads chatparts.js and wires the new pieces.
 """
 import hashlib
@@ -480,6 +481,20 @@ ok("quick: a later user message hides them", P.quickReplies([{ id: 2, role: "ass
 ok("quick: tool rows after the question are skipped", ask("Should I make it?", [{ id: 3, role: "tool", content: "x" }]) !== null);
 ok("quick: a tool-call-only step does not count as the question", ask("Want me to fix it?", [{ id: 3, role: "assistant", content: "" }]) !== null);
 ok("quick: question inside code ignored", ask("Run this:\n```\nshould I?\n```") === null);
+
+const LH = 23.2;  // 16px text at line height 1.45
+const fold = (full, line, open) => J(P.clampState(full, line, P.CLAMP_LINES, open));
+const flat = J({ over: false, clamped: false, button: "" });
+ok("fold: four lines, like the desktop", P.CLAMP_LINES === 4);
+ok("fold: short text not folded, no button", fold(2 * LH, LH, false) === flat);
+ok("fold: exactly 4 lines not folded", fold(4 * LH, LH, false) === flat && fold(Math.round(4 * LH), LH, false) === flat);
+ok("fold: 4 lines + 1 px folded, Show all", fold(4 * LH + 1, LH, false) === J({ over: true, clamped: true, button: "Show all" }));
+ok("fold: opened shows Show less", fold(300 * LH, LH, true) === J({ over: true, clamped: false, button: "Show less" }));
+ok("fold: zero, negative or missing line height never folds",
+  [0, -5, NaN, undefined, null, "normal", Infinity].every((bad) => fold(300 * LH, bad, false) === flat));
+ok("fold: zero or missing height never folds", [0, -1, NaN, undefined].every((bad) => fold(bad, LH, false) === flat));
+ok("fold: bad line count falls back to 4", J(P.clampState(5 * LH, LH, 0, false)) === J(P.clampState(5 * LH, LH, 4, false)) &&
+  J(P.clampState(3 * LH, LH, NaN, false)) === flat);
 process.stdout.write(JSON.stringify(out));
 """
 
@@ -543,6 +558,36 @@ check("search results replace the list", re.search(r"if \(searching\(\)\) \{\s*r
 check("chat title opens the session menu", '$("chat-title").addEventListener("click", () => toggleMenu())' in app and
       'id="chat-title" role="button"' in html)
 check("header keeps clear of side cutouts", "env(safe-area-inset-right)" in read("page/app.css"))
+fold_css = css.split(".bubble-text.clamped {")[1].split("}")[0] if ".bubble-text.clamped {" in css else ""
+check("fold: CSS folds to 4 lines with the desktop's fade (and the -webkit- form)",
+      "max-height: calc(4 * var(--bubble-lh) * 1em" in fold_css and "overflow: hidden" in fold_css and
+      "-webkit-mask-image: linear-gradient(to bottom, #000 55%, transparent)" in fold_css and
+      "\n  mask-image: linear-gradient(to bottom, #000 55%, transparent)" in fold_css)
+toggle_css = css.split(".clamp-toggle {")[1].split("}")[0] if ".clamp-toggle {" in css else ""
+check("fold: Show all is a muted 44 px button, hidden when not needed",
+      "min-height: 44px" in toggle_css and "var(--muted-fg)" in toggle_css and ".clamp-toggle[hidden] { display: none; }" in css)
+check("fold: user bubbles fold, keyed by row, live run and guidance",
+      "function userBubble(text, steer, sources, key)" in app and "watchClamp(words);" in app and
+      app.count("rowClampKey(message))") == 2 and
+      "userBubble(sources ? run.shownText || \"\" : run.userText, false, sources, run._clampKey)" in app and
+      "userBubble(block.text || \"\", true, undefined, block._clampKey)" in app)
+check("fold: measured from layout, reads before writes, re-measured on width change",
+      "new ResizeObserver(" in app and "words.scrollHeight" in app and "getComputedStyle(words).lineHeight" in app and
+      re.search(r"const sizes = texts\.map\([^\n]*\);\n  for \(const size of sizes\)", app) and
+      "CLAMP.widths.get(entry.target) === width" in app)
+check("fold: rule and button text from PhoneParts.clampState, aria-expanded set",
+      "PhoneParts.clampState(size.full, size.line, PhoneParts.CLAMP_LINES, CLAMP.open.has(key))" in app and
+      "button.textContent = look.button" in app and 'button.setAttribute("aria-expanded"' in app)
+check("fold: opened state kept until Show less or another chat; live -> saved carries over",
+      "historyNodes.clear();\n  resetClamps();" in app and 'CLAMP.open.add("m" + saved.id)' in app)
+check("fold: a search hit inside a folded message opens it",
+      "CLAMP.query = searching() ? SEARCH.q.toLowerCase() : \"\"" in app and
+      "words.textContent.toLowerCase().includes(CLAMP.query)" in app)
+check("fold: the button is not part of the double tap (buttons skipped)",
+      re.search(r'target\.closest\("a, button,[^"]*"\)\) return;\n  if \(!TAP\(', app))
+check("fold: only the text folds, the whole text stays in the page",
+      "words.textContent = shown;" in app and "words.after(button)" in app and ".bubble-text.clamped" in css and
+      ".bubble.clamped" not in css)
 check("new endpoints are local, not forwarded",
       all(p in serve.LOCAL_API for p in (serve.REACTIONS_PATH, serve.REACTIONS_UNSEEN_PATH, serve.SEARCH_PATH)))
 

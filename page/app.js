@@ -2491,6 +2491,7 @@ async function openSession(id, title, push, profile) {
   paintSendState();
   markRead(id);
   historyNodes.clear();
+  resetClamps();
   if (state.tail && state.tail.sessionId !== id) state.tail = null;
   notice("");
   toggleMenu(false);
@@ -2852,10 +2853,104 @@ function paintDraftHint() {
     : hasUser ? "Send a follow-up" : "Give Hermes a task";
 }
 
+// --- Long messages fold ------------------------------------------------------------
+// Like the desktop's user bubbles: a message you sent that runs past 4 lines
+// folds with a fade, and "Show all" under it opens it (a tap on the bubble
+// would fight the double tap for reactions). Only the text folds; pictures
+// and file chips stay in view. The whole text stays in the page, so select,
+// copy and reactions still see all of it. Opened ones stay open until Show
+// less or until another chat opens.
+const CLAMP = { open: new Set(), query: "", seq: 0, observer: null, watched: new WeakSet(), widths: new WeakMap() };
+
+function rowClampKey(message) {
+  return message && message.id != null ? "m" + message.id : undefined;
+}
+
+function resetClamps() {
+  CLAMP.open.clear();
+  // Opened from a search result: a folded message holding the words opens.
+  CLAMP.query = searching() ? SEARCH.q.toLowerCase() : "";
+  if (CLAMP.observer) CLAMP.observer.disconnect();
+  CLAMP.watched = new WeakSet();
+  CLAMP.widths = new WeakMap();
+}
+
+// One observer for every bubble. It fires once a bubble is laid out and again
+// when its width changes (rotation, split view); a bubble's own fold changes
+// only its height, so that is skipped.
+function watchClamp(words) {
+  if (CLAMP.watched.has(words)) return;
+  if (!CLAMP.observer) {
+    if (typeof ResizeObserver !== "function") return;
+    CLAMP.observer = new ResizeObserver((entries) => {
+      const texts = [];
+      for (const entry of entries) {
+        const width = Math.round(entry.contentRect.width);
+        if (!width || !entry.target.isConnected || CLAMP.widths.get(entry.target) === width) continue;
+        CLAMP.widths.set(entry.target, width);
+        texts.push(entry.target);
+      }
+      if (texts.length) measureClamps(texts);
+    });
+  }
+  CLAMP.watched.add(words);
+  CLAMP.observer.observe(words);
+}
+
+// Every size is read before any class is written, so a transcript with
+// hundreds of bubbles costs one layout, not one per bubble.
+function measureClamps(texts) {
+  const sizes = texts.map((words) => ({ words, full: words.scrollHeight, line: parseFloat(getComputedStyle(words).lineHeight) }));
+  for (const size of sizes) {
+    size.words._clampSize = size;
+    paintClamp(size.words);
+  }
+}
+
+function paintClamp(words) {
+  const size = words._clampSize;
+  if (!size) return;
+  const key = words.dataset.clampKey;
+  if (CLAMP.query && !CLAMP.open.has(key) && PhoneParts.clampState(size.full, size.line, PhoneParts.CLAMP_LINES, false).over &&
+      words.textContent.toLowerCase().includes(CLAMP.query)) CLAMP.open.add(key);
+  const look = PhoneParts.clampState(size.full, size.line, PhoneParts.CLAMP_LINES, CLAMP.open.has(key));
+  words.classList.toggle("clamped", look.clamped);
+  let button = words._clampButton;
+  if (!look.button) {
+    if (button) button.hidden = true;
+    return;
+  }
+  if (!button) {
+    // Made only for a long message, so a short one is the same as before.
+    button = document.createElement("button");
+    button.type = "button";
+    button.className = "clamp-toggle";
+    button.addEventListener("click", () => toggleClamp(words));
+    words.after(button);
+    words._clampButton = button;
+  }
+  button.hidden = false;
+  button.textContent = look.button;
+  button.setAttribute("aria-expanded", String(!look.clamped));
+}
+
+function toggleClamp(words) {
+  const key = words.dataset.clampKey;
+  if (!CLAMP.open.delete(key)) CLAMP.open.add(key);
+  paintClamp(words);
+  if (CLAMP.open.has(key)) return;
+  // Folding a long message moves its button up; bring it back into view.
+  const root = $("transcript");
+  const at = words._clampButton.getBoundingClientRect().top;
+  const top = root.getBoundingClientRect().top;
+  if (at < top) root.scrollTop -= top - at + 12;
+}
+
 // sources: pictures to show in the bubble, each {url} (a local preview) or
 // {path} (a file on the Mac). Without them, picture lines in the saved text
-// are turned back into pictures.
-function userBubble(text, steer, sources) {
+// are turned back into pictures. key: what keeps a long message opened
+// across redraws ("m<row id>" for a saved row, else one made up per bubble).
+function userBubble(text, steer, sources, key) {
   const wrap = document.createElement("div");
   wrap.className = "msg user" + (steer ? " steer" : "");
   if (steer) {
@@ -2880,7 +2975,9 @@ function userBubble(text, steer, sources) {
     const words = document.createElement("div");
     words.className = "bubble-text";
     words.textContent = shown;
+    words.dataset.clampKey = key || "b" + (++CLAMP.seq);
     bubble.append(words);
+    watchClamp(words);
   }
   const pics = attached.filter((s) => s.kind !== "file");
   const files = attached.filter((s) => s.kind === "file");
@@ -3328,7 +3425,7 @@ function renderHistoryMessage(message, results) {
   if (message.role === "user") {
     if (message.display_kind === STEER_KIND) {
       const steer = steerText(message.content);
-      return steer.trim() ? userBubble(steer, true) : null;
+      return steer.trim() ? userBubble(steer, true, undefined, rowClampKey(message)) : null;
     }
     if (!text) return null;
     if (message.display_kind) {
@@ -3337,7 +3434,7 @@ function renderHistoryMessage(message, results) {
       note.textContent = text.replace(/^\[System:\s*/, "").replace(/\]$/, "");
       return note;
     }
-    return userBubble(textOf(message.content), false);
+    return userBubble(textOf(message.content), false, undefined, rowClampKey(message));
   }
   if (message.role === "tool") {
     // Its call is on an earlier page, so draw the result on its own.
@@ -3511,13 +3608,25 @@ function liveContainer() {
 }
 
 function userNode(run) {
-  if (!run.userText || historyHasUser(run)) return null;
+  if (!run.userText) return null;
+  if (historyHasUser(run)) {
+    // Saved now: a message opened while it was live stays open as its row.
+    if (run._clampKey && CLAMP.open.delete(run._clampKey)) {
+      const saved = state.messages.filter(realUser).pop();
+      if (saved && saved.id != null) CLAMP.open.add("m" + saved.id);
+    }
+    return null;
+  }
   if (!run._userNode) {
     // Pictures being sent show from their local preview; after a reload, from the Mac.
     // Without local previews (after a reload) userBubble reads the paths out of the text.
     const sources = run.picSources && run.picSources.length ? run.picSources : undefined;
-    run._userNode = userBubble(sources ? run.shownText || "" : run.userText, false, sources);
+    run._clampKey = run._clampKey || "run" + (++CLAMP.seq);
+    run._userNode = userBubble(sources ? run.shownText || "" : run.userText, false, sources, run._clampKey);
   }
+  // Watching stops when another chat opens; a reply still running here is watched again.
+  const words = run._userNode.querySelector(".bubble-text");
+  if (words) watchClamp(words);
   return run._userNode;
 }
 
@@ -3760,7 +3869,10 @@ function pruneSavedBlocks(run) {
 }
 
 function renderLiveBlock(block) {
-  if (block.kind === "steer") return userBubble(block.text || "", true);
+  if (block.kind === "steer") {
+    block._clampKey = block._clampKey || "steer" + (++CLAMP.seq);
+    return userBubble(block.text || "", true, undefined, block._clampKey);
+  }
   if (block.kind === "text") {
     const wrap = document.createElement("div");
     wrap.className = "msg assistant";
