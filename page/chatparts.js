@@ -400,7 +400,64 @@
     return "";
   }
 
+  // Date dividers (sync row S56, after the desktop's thread/date-divider.tsx):
+  // a dated line above the first message of each local day.
+  // A row's send time in ms: Hermes saves `timestamp` in Unix seconds (a
+  // number or a numeric string). Null when missing or not a time.
+  function messageMs(message) {
+    const raw = message && typeof message === "object" ? message.timestamp : null;
+    const n = typeof raw === "number" ? raw : typeof raw === "string" && raw.trim() ? Number(raw) : NaN;
+    if (!isFinite(n) || n <= 0) return null;
+    return n > 1e12 ? n : n * 1000;
+  }
+
+  // "YYYY-MM-DD" of the local calendar day, or null.
+  function dayKey(ms) {
+    if (typeof ms !== "number" || !isFinite(ms) || ms <= 0) return null;
+    const d = new Date(ms);
+    const two = (v) => (v < 10 ? "0" : "") + v;
+    return d.getFullYear() + "-" + two(d.getMonth() + 1) + "-" + two(d.getDate());
+  }
+
+  // {prefix, date, text}: "Mon, Nov 2" (", 2025" only when not this year);
+  // prefix "Today" / "Yesterday" against nowMs, so call it at paint time.
+  function dividerLabel(key, nowMs) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(key || ""));
+    if (!m) return { prefix: "", date: "", text: "" };
+    const day = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+    const now = new Date(typeof nowMs === "number" && isFinite(nowMs) ? nowMs : Date.now());
+    let date = day.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+    if (day.getFullYear() !== now.getFullYear()) date += ", " + day.getFullYear();
+    const today = dayKey(now.getTime());
+    const yesterday = dayKey(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 12).getTime());
+    const prefix = key === today ? "Today" : key === yesterday ? "Yesterday" : "";
+    return { prefix, date, text: prefix ? prefix + " \u00b7 " + date : date };
+  }
+
+  // For the shown rows (oldest first), the day each one opens, or null. A
+  // divider goes above the first shown row when it has a time, and above a
+  // message you sent that starts a new local day. Replies never open one, so
+  // a turn that runs past midnight stays under the day it started. Rows with
+  // no time get none and leave the running day alone. A day opens once.
+  function dayBreaks(rows) {
+    const list = Array.isArray(rows) ? rows : [];
+    const seen = new Set();
+    let running = null;
+    return list.map((row, i) => {
+      const key = dayKey(messageMs(row));
+      if (!key) return null;
+      const mineRow = Boolean(row) && row.role === "user" && !row.display_kind;
+      if (i !== 0 && !mineRow) return null;
+      const open = key !== running && !seen.has(key);
+      running = key;
+      if (!open) return null;
+      seen.add(key);
+      return key;
+    });
+  }
+
   root.PhoneParts = {
+    messageMs, dayKey, dividerLabel, dayBreaks,
     CLAMP_LINES, clampState, copyText,
     TODO_TOOLS, isTodoTool, parseTodos, todoTree, todoProgress, todoWeight, todoTone, runOutcome, freshlyDone,
     latestTodos, planVisible, planState, waitedOnId, stepName, segLook, rowHalt,

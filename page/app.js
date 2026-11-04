@@ -2775,6 +2775,45 @@ function changedFilesCard(turnKey, edits) {
   return card;
 }
 
+// --- Date dividers (S56) -----------------------------------------------------
+// One node per day, kept so the 4-second refresh reuses it instead of
+// re-inserting a new one. The label is worked out at every paint, so "Today"
+// turns into "Yesterday" after midnight without a reload.
+const dividerNodes = new Map();
+
+function dayDivider(key, nowMs) {
+  const label = PhoneParts.dividerLabel(key, nowMs);
+  let hit = dividerNodes.get(key);
+  if (!hit) {
+    const node = document.createElement("div");
+    node.className = "day-divider";
+    node.setAttribute("role", "separator");
+    const left = document.createElement("span");
+    left.className = "day-line";
+    const cap = document.createElement("span");
+    cap.className = "day-cap";
+    const right = document.createElement("span");
+    right.className = "day-line";
+    node.append(left, cap, right);
+    hit = { node, cap, text: null };
+    dividerNodes.set(key, hit);
+  }
+  if (hit.text !== label.text) {
+    hit.cap.textContent = "";
+    if (label.prefix) {
+      const pre = document.createElement("span");
+      pre.className = "day-pre";
+      pre.textContent = label.prefix;
+      hit.cap.append(pre, " \u00b7 " + label.date);
+    } else {
+      hit.cap.textContent = label.date;
+    }
+    hit.node.setAttribute("aria-label", label.text);
+    hit.text = label.text;
+  }
+  return hit.node;
+}
+
 function renderTranscript(opts) {
   const root = $("transcript");
   const stick = nearBottom(root);
@@ -2790,6 +2829,7 @@ function renderTranscript(opts) {
   const called = callsShown(state.messages);
   let turnKey = "start";
   let edits = [];
+  const shownRows = [];
   const flush = () => {
     if (edits.length) wanted.push(changedFilesCard(turnKey, edits));
     edits = [];
@@ -2806,10 +2846,18 @@ function renderTranscript(opts) {
     if (message.role === "assistant") edits = edits.concat(editsOf(message, results));
     const node = historyNode(message, results);
     if (!node) continue;
+    shownRows.push({ message, at: wanted.length });
     wanted.push(node);
     shown += 1;
   }
   flush();
+  // Date dividers (S56): one above the first message of each local day.
+  // Spliced from the end so earlier positions stay valid.
+  const breaks = PhoneParts.dayBreaks(shownRows.map((r) => r.message));
+  const nowMs = Date.now();
+  for (let i = shownRows.length - 1; i >= 0; i--) {
+    if (breaks[i]) wanted.splice(shownRows[i].at, 0, dayDivider(breaks[i], nowMs));
+  }
   if (!shown && !currentRun()) {
     const empty = document.createElement("div");
     empty.className = "intro";

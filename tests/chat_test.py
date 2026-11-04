@@ -503,6 +503,55 @@ ok("copy: tool rows, empty rows and junk give nothing",
   P.copyText(null) === "" && P.copyText("text") === "");
 ok("fold: bad line count falls back to 4", J(P.clampState(5 * LH, LH, 0, false)) === J(P.clampState(5 * LH, LH, 4, false)) &&
   J(P.clampState(3 * LH, LH, NaN, false)) === flat);
+
+// Date dividers (S56). Times built from local dates, so any time zone works.
+const at = (y, mo, d, h, mi) => new Date(y, mo - 1, d, h, mi || 0).getTime() / 1000;
+const u = (ts) => ({ role: "user", content: "x", timestamp: ts });
+const a = (ts) => ({ role: "assistant", content: "y", timestamp: ts });
+const NOW = new Date(2026, 10, 4, 15, 0).getTime();
+ok("day: send time from Unix seconds, numeric strings and ms; junk is null",
+  P.messageMs({ timestamp: 1793827630.5 }) === 1793827630500 && P.messageMs({ timestamp: "1793827630" }) === 1793827630000 &&
+  P.messageMs({ timestamp: 1793827630500 }) === 1793827630500 &&
+  [undefined, null, "", "abc", 0, -5, NaN].every((t) => P.messageMs({ timestamp: t }) === null) && P.messageMs(null) === null);
+ok("day: key is the local calendar day", P.dayKey(at(2026, 11, 2, 0, 5) * 1000) === "2026-11-02" &&
+  P.dayKey(at(2026, 11, 2, 23, 59) * 1000) === "2026-11-02" && P.dayKey(null) === null);
+ok("divider: first message gets one, same-day messages none",
+  J(P.dayBreaks([u(at(2026, 11, 2, 9)), a(at(2026, 11, 2, 9, 1)), u(at(2026, 11, 2, 14)), a(at(2026, 11, 2, 14, 2))])) ===
+  J(["2026-11-02", null, null, null]));
+ok("divider: a new day's first message you sent opens it",
+  J(P.dayBreaks([u(at(2026, 11, 2, 9)), a(at(2026, 11, 2, 9, 1)), u(at(2026, 11, 3, 8)), a(at(2026, 11, 3, 8, 1))])) ===
+  J(["2026-11-02", null, "2026-11-03", null]));
+ok("divider: a turn past midnight stays under the day it started",
+  J(P.dayBreaks([u(at(2026, 11, 2, 23, 50)), a(at(2026, 11, 3, 0, 10)), a(at(2026, 11, 3, 0, 20)), u(at(2026, 11, 3, 7))])) ===
+  J(["2026-11-02", null, null, "2026-11-03"]));
+ok("divider: a page that starts on a reply gets one above it",
+  J(P.dayBreaks([a(at(2026, 11, 2, 10)), u(at(2026, 11, 3, 9))])) === J(["2026-11-02", "2026-11-03"]));
+ok("divider: no time, no divider, and the running day is kept",
+  J(P.dayBreaks([u(undefined), u(at(2026, 11, 2, 9)), u(null), u(at(2026, 11, 2, 10)), u(at(2026, 11, 3, 9))])) ===
+  J([null, "2026-11-02", null, null, "2026-11-03"]));
+ok("divider: Hermes notices (display_kind) don't open a day",
+  J(P.dayBreaks([u(at(2026, 11, 2, 9)), { role: "user", display_kind: "steer", timestamp: at(2026, 11, 3, 1) }])) ===
+  J(["2026-11-02", null]));
+ok("divider: a day opens once even if times go backwards",
+  J(P.dayBreaks([u(at(2026, 11, 2, 9)), u(at(2026, 11, 3, 9)), u(at(2026, 11, 2, 12)), u(at(2026, 11, 3, 10))])) ===
+  J(["2026-11-02", "2026-11-03", null, null]));
+const lab = (key, now) => P.dividerLabel(key, now);
+const short = (y, mo, d) => new Date(y, mo - 1, d).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+ok("label: Today and Yesterday prefix, older plain", lab("2026-11-04", NOW).text === "Today \u00b7 " + short(2026, 11, 4) &&
+  lab("2026-11-04", NOW).prefix === "Today" && lab("2026-11-03", NOW).text === "Yesterday \u00b7 " + short(2026, 11, 3) &&
+  lab("2026-11-02", NOW).text === short(2026, 11, 2) && lab("2026-11-02", NOW).prefix === "");
+ok("label: short date like Mon, Nov 2 in en-US", !/en/i.test(Intl.DateTimeFormat().resolvedOptions().locale) ||
+  lab("2026-11-02", NOW).date === "Mon, Nov 2");
+ok("label: year only when it isn't this year", lab("2025-12-31", NOW).date === short(2025, 12, 31) + ", 2025" &&
+  !/2026/.test(lab("2026-01-05", NOW).date));
+ok("label: Yesterday across a month end and a year end",
+  lab("2026-10-31", new Date(2026, 10, 1, 0, 1).getTime()).prefix === "Yesterday" &&
+  lab("2026-11-01", new Date(2026, 10, 1, 0, 1).getTime()).prefix === "Today" &&
+  lab("2025-12-31", new Date(2026, 0, 1, 9).getTime()).prefix === "Yesterday");
+ok("label: worked out against the time it is painted (midnight turns Today into Yesterday)",
+  lab("2026-11-04", new Date(2026, 10, 4, 23, 59).getTime()).prefix === "Today" &&
+  lab("2026-11-04", new Date(2026, 10, 5, 0, 0).getTime()).prefix === "Yesterday");
+ok("label: bad key gives nothing", lab("nope", NOW).text === "" && lab(null, NOW).text === "");
 process.stdout.write(JSON.stringify(out));
 """
 
@@ -611,6 +660,26 @@ check("copy: clipboard write starts inside the tap (no await first), with a fall
       "await" not in copy_src and "copyToClipboard(text)" in copy_src and "navigator.clipboard.writeText(text)" in app and
       'document.execCommand("copy")' in app and 'button.textContent = "Copied"' in copy_src)
 check("copy: styled, scratch box off screen", ".tap-copy {" in css and ".copy-scratch {" in css and "left: -9999px" in css)
+render_src = app.split("function renderTranscript(opts) {")[1].split("\n}\n")[0] if "function renderTranscript(opts) {" in app else ""
+check("dividers: rule from PhoneParts.dayBreaks, label worked out at paint time",
+      "PhoneParts.dayBreaks(shownRows.map((r) => r.message))" in render_src and "const nowMs = Date.now();" in render_src and
+      "PhoneParts.dividerLabel(key, nowMs)" in app)
+check("dividers: spliced in before the day's first message, Load earlier first and #live last",
+      "shownRows.push({ message, at: wanted.length });" in render_src and
+      "wanted.splice(shownRows[i].at, 0, dayDivider(breaks[i], nowMs))" in render_src and
+      render_src.index("dayBreaks") < render_src.index("wanted.push(live)") and
+      "if (state.hasEarlier) wanted.push(earlierButton());" in render_src)
+check("dividers: one cached node per day, text updated only when the label changes",
+      "const dividerNodes = new Map();" in app and "dividerNodes.get(key)" in app and "if (hit.text !== label.text)" in app)
+check("dividers: separator role and full-text aria-label, no inline styles",
+      'node.setAttribute("role", "separator")' in app and 'setAttribute("aria-label", label.text)' in app and
+      ".style." not in app.split("function dayDivider(key, nowMs) {")[1].split("\n}\n")[0])
+div_css = css.split(".day-divider {")[1].split("}")[0] if ".day-divider {" in css else ""
+check("dividers: centred hairline look, Today/Yesterday in the accent colour",
+      "display: flex" in div_css and "gap: 8px" in div_css and "margin: 14px 0 12px" in div_css and
+      ".day-line { flex: 1; height: 1px; background: var(--border); }" in css and
+      ".day-cap { font-size: 12px; font-weight: 600; color: var(--muted-fg); white-space: nowrap; }" in css and
+      ".day-pre { color: var(--primary); }" in css)
 check("new endpoints are local, not forwarded",
       all(p in serve.LOCAL_API for p in (serve.REACTIONS_PATH, serve.REACTIONS_UNSEEN_PATH, serve.SEARCH_PATH)))
 

@@ -209,6 +209,12 @@ input[type="password"]:focus, input.code:focus, textarea:focus { border-color: v
   -webkit-overflow-scrolling: touch;
 }
 .list { overscroll-behavior-y: contain; }
+/* Date dividers (S56): a centred date between two hairlines, above the first
+   message of each day. Today/Yesterday in the accent colour. */
+.day-divider { display: flex; align-items: center; gap: 8px; margin: 14px 0 12px; }
+.day-line { flex: 1; height: 1px; background: var(--border); }
+.day-cap { font-size: 12px; font-weight: 600; color: var(--muted-fg); white-space: nowrap; }
+.day-pre { color: var(--primary); }
 .pull-tip { height: 0; overflow: hidden; display: flex; align-items: center; justify-content: center; gap: 8px;
   background: var(--sidebar); color: var(--muted-fg); font-size: 13px; flex: none; transition: height 0.15s ease-out; }
 .pull-spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--border);
