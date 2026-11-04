@@ -3663,9 +3663,10 @@ function watchOther(on) {
 }
 
 // One shared one-second tick while a reply runs in the open session: the
-// status line's timers and the running step's clock.
+// status line's timers, the running step's clock and the Planning card's time.
 setInterval(() => {
   if (OTHER.busy && OTHER.node && OTHER.node.isConnected && !document.hidden) otherLine();
+  if (!document.hidden) tickPlanTime();
   const run = liveRun(state.sessionId);
   if (!run || document.hidden) return;
   if (run._statusNode && run._statusNode.isConnected) statusNode(run);
@@ -5319,8 +5320,13 @@ document.addEventListener("pointerdown", (event) => {
 // message box with progress and the step in hand; tap it for the whole list.
 // It shows while a reply runs (here or on the desktop), then stays, folded,
 // for that turn's list until you close it or send the next message.
+// Sticky (after the desktop's S53): while a reply runs with no list yet it
+// says "Planning…" with grey stripes and the elapsed time; a reply that ends
+// without a list brings the previous one back as "Previous tasks n/N"; a reply
+// that ends with steps open turns it yellow, "Waiting on you".
 const PLAN = { sessionId: null, todos: null, rowId: 0, floor: 0, open: false, sig: "", timer: 0,
-  doneIds: null, shownPct: null, pctFrame: 0 };
+  doneIds: null, shownPct: null, pctFrame: 0, view: "hidden", planningClosed: "", planningSeen: null,
+  timeNode: null };
 // How the last phone-started reply ended, per session ("failed" / "stopped"),
 // for the card's red state. A new task-list write clears it.
 const PLAN_OUTCOME = {};
@@ -5410,6 +5416,29 @@ function planWorking() {
   return Boolean(liveRun(state.sessionId) || OTHER.busy);
 }
 
+// The reply running in the chat on screen: a key for this turn (closing the
+// Planning card hides it for this turn only) and when it started, in ms (0
+// when not known). Null when nothing runs.
+function planTurn() {
+  const run = liveRun(state.sessionId);
+  if (run) return { key: state.sessionId + ":run:" + (run.startedAt || ""), since: Number(run.startedAt) || 0 };
+  if (OTHER.busy) {
+    const since = Number(OTHER.busy.since) || 0;
+    return { key: state.sessionId + ":lease:" + since, since: since * 1000 };
+  }
+  return null;
+}
+
+// Planning time: from when the reply started, else from when the card appeared.
+function planningSince(turn) {
+  return (turn && turn.since) || (PLAN.planningSeen && PLAN.planningSeen.at) || Date.now();
+}
+
+function tickPlanTime() {
+  if (PLAN.view !== "planning" || !PLAN.timeNode || !PLAN.timeNode.isConnected) return;
+  PLAN.timeNode.textContent = clock(Date.now() - planningSince(planTurn()));
+}
+
 function lastUserRowId() {
   let last = 0;
   for (const m of state.messages) if (realUser(m) && Number(m.id) > last) last = Number(m.id);
@@ -5423,6 +5452,7 @@ function todoMark(status) {
 function todoListNode(todos, tone) {
   const list = document.createElement("ul");
   list.className = "todo-list";
+  const waitingId = PhoneParts.waitedOnId(todos, tone);
   for (const [todo, depth] of PhoneParts.todoTree(todos)) {
     const item = document.createElement("li");
     item.className = "todo " + todo.status;
@@ -5430,14 +5460,15 @@ function todoListNode(todos, tone) {
     const mark = document.createElement("span");
     mark.className = "todo-mark";
     mark.setAttribute("aria-hidden", "true");
-    // The step the list stopped on (red ✕) or waits on you for (yellow ‖).
-    const halted = todo.status === "in_progress" && (tone === "failed" || tone === "stopped" || tone === "waiting");
-    if (halted) item.classList.add("halt-" + tone);
-    mark.textContent = halted ? (tone === "waiting" ? "\u2016" : "\u2715") : todoMark(todo.status);
+    // The step the list stopped on or that hit an error (red ✕), or the one
+    // it waits on you for (yellow ‖).
+    const halted = PhoneParts.rowHalt(todo, tone, waitingId);
+    if (halted) item.classList.add("halt-" + halted);
+    mark.textContent = halted ? (halted === "waiting" ? "\u2016" : "\u2715") : todoMark(todo.status);
     const text = document.createElement("span");
     text.className = "todo-text";
     text.textContent = todo.content;
-    item.setAttribute("aria-label", todo.status.replace("_", " ") + ": " + todo.content);
+    item.setAttribute("aria-label", todo.status.replace("_", " ") + (todo.error ? ", error" : "") + ": " + todo.content);
     item.append(mark, text);
     list.append(item);
   }
@@ -5450,15 +5481,29 @@ function paintPlan() {
   const working = planWorking();
   const key = state.sessionId + ":" + PLAN.rowId;
   const dismissed = planClosedSet().has(key);
-  const visible = PLAN.sessionId === state.sessionId &&
-    PhoneParts.planVisible(PLAN, { working, dismissed, lastUserRowId: lastUserRowId(), floorRowId: PLAN.floor });
+  const turn = planTurn();
+  const view = PLAN.sessionId !== state.sessionId ? "hidden" : PhoneParts.planState(PLAN, {
+    working, dismissed, planningDismissed: Boolean(turn) && PLAN.planningClosed === turn.key,
+    lastUserRowId: lastUserRowId(), floorRowId: PLAN.floor });
+  // The previous list comes back folded.
+  if (view === "previous" && PLAN.view !== "previous") PLAN.open = false;
+  PLAN.view = view;
+  const visible = view !== "hidden";
   const outcome = PLAN_OUTCOME[state.sessionId] || null;
-  const sig = visible ? JSON.stringify([PLAN.todos, PLAN.open, working, outcome]) : "";
+  const sig = visible ? JSON.stringify([view, view === "planning" ? turn.key : PLAN.todos, PLAN.open, working, outcome]) : "";
   if (sig === PLAN.sig && box.hidden === !visible) return;
   PLAN.sig = sig;
   box.hidden = !visible;
   box.textContent = "";
+  PLAN.timeNode = null;
+  box.classList.toggle("planning", view === "planning");
+  box.classList.toggle("previous", view === "previous");
   if (!visible) return;
+  if (view === "planning") {
+    paintPlanning(box, turn);
+    return;
+  }
+  const previous = view === "previous";
   const prog = PhoneParts.todoProgress(PLAN.todos);
   const finished = prog.total > 0 && prog.open === 0;
   const tone = PhoneParts.todoTone(PLAN.todos, outcome, working);
@@ -5478,40 +5523,56 @@ function paintPlan() {
   count.className = "plan-count";
   const pct = document.createElement("span");
   countPlanPct(pct, prog.percent);
-  const sub = document.createElement("span");
-  sub.className = "plan-sub";
-  sub.textContent = prog.done + "/" + prog.total;
-  count.append(pct, sub);
+  count.append(pct);
+  if (!previous) {
+    const sub = document.createElement("span");
+    sub.className = "plan-sub";
+    sub.textContent = prog.done + "/" + prog.total;
+    count.append(sub);
+  }
   const now = document.createElement("span");
   now.className = "plan-now";
   const tag = { failed: "Failed", stopped: "Stopped", waiting: "Waiting on you" }[tone];
   const step = prog.current ? prog.current.content : (prog.open + " to go");
-  now.textContent = finished ? "All done" : tag ? tag + " \u00b7 " + step : step;
+  const what = previous ? "Previous tasks " + prog.done + "/" + prog.total : finished ? "All done" : step;
+  if (tag && !finished) {
+    const tagNode = document.createElement("span");
+    tagNode.className = "plan-tag";
+    tagNode.textContent = tag;
+    now.append(tagNode, " \u00b7 " + what);
+  } else {
+    now.textContent = what;
+  }
   const chev = document.createElement("span");
   chev.className = "chev";
   chev.setAttribute("aria-hidden", "true");
   chev.textContent = "\u203a";
   head.append(icon, count, now, chev);
-  head.setAttribute("aria-label", "Tasks: " + prog.percent + " percent, " + prog.done + " of " + prog.total + " done" +
+  head.setAttribute("aria-label", (previous ? "Previous tasks: " : "Tasks: ") + prog.percent + " percent, " + prog.done + " of " + prog.total + " done" +
     (tag ? ", " + tag : "") + (prog.current ? ", now: " + prog.current.content : ""));
   head.addEventListener("click", () => {
     PLAN.open = !PLAN.open;
     paintPlan();
   });
   // One segment per step, as wide as its weight: done solid, running striped,
-  // the step it stopped or waits on outlined, the rest grey.
+  // the rest grey. Outlined: the step it waits on (yellow; finished steps keep
+  // the accent colour), the step a stopped or failed list halted on (red, with
+  // every done step red too). A step marked error is red on its own.
   // A step that just finished fills left to right over 1 s; the running step's
   // stripes scroll left to right (app.css).
   const fresh = new Set(PhoneParts.freshlyDone(PLAN.doneIds, PLAN.todos));
   PLAN.doneIds = PLAN.todos.filter((t) => t.status === "completed").map((t) => t.id);
   const bar = document.createElement("div");
   bar.className = "plan-bar";
+  const waitingId = PhoneParts.waitedOnId(PLAN.todos, tone);
   for (const [todo] of PhoneParts.todoTree(PLAN.todos)) {
     if (todo.status === "cancelled") continue;
     const seg = document.createElement("span");
     seg.className = "plan-seg " + todo.status;
     if (fresh.has(todo.id)) seg.classList.add("fresh");
-    if (todo.status === "in_progress" && (tone === "failed" || tone === "stopped" || tone === "waiting")) seg.classList.add("halt");
+    const look = PhoneParts.segLook(todo, tone, waitingId);
+    if (look.halt) seg.classList.add("halt", "halt-" + look.halt);
+    if (look.error) seg.classList.add("error");
     seg.style.flexGrow = String(PhoneParts.todoWeight(todo));
     bar.append(seg);
   }
@@ -5539,6 +5600,47 @@ function paintPlan() {
     body.append(todoListNode(PLAN.todos, tone));
     box.append(body);
   }
+}
+
+// "Planning…": a reply runs and this turn has no task list yet. One full-width
+// segment of grey moving stripes and the time so far; × hides it for this turn.
+function paintPlanning(box, turn) {
+  for (const c of ["done", "open", "tone-failed", "tone-stopped", "tone-waiting"]) box.classList.remove(c);
+  if (!PLAN.planningSeen || PLAN.planningSeen.key !== turn.key) PLAN.planningSeen = { key: turn.key, at: Date.now() };
+  const head = document.createElement("div");
+  head.className = "plan-head";
+  head.setAttribute("role", "status");
+  head.setAttribute("aria-label", "Planning the task list");
+  const icon = document.createElement("span");
+  icon.className = "plan-ico";
+  icon.setAttribute("aria-hidden", "true");
+  icon.textContent = "\u2611";
+  const now = document.createElement("span");
+  now.className = "plan-now";
+  now.textContent = "Planning\u2026";
+  const time = document.createElement("span");
+  time.className = "plan-time";
+  head.append(icon, now, time);
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "plan-close";
+  close.setAttribute("aria-label", "Hide this until the reply ends");
+  close.textContent = "\u00d7";
+  close.addEventListener("click", () => {
+    PLAN.planningClosed = turn.key;
+    paintPlan();
+  });
+  const top = document.createElement("div");
+  top.className = "plan-top";
+  top.append(head, close);
+  const bar = document.createElement("div");
+  bar.className = "plan-bar";
+  const seg = document.createElement("span");
+  seg.className = "plan-seg planning";
+  bar.append(seg);
+  box.append(top, bar);
+  PLAN.timeNode = time;
+  tickPlanTime();
 }
 
 // --- Search ----------------------------------------------------------------------

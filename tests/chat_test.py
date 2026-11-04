@@ -350,8 +350,8 @@ ok("weights: the mockup's percentages", [P.todoProgress(job(1, 1)).percent, P.to
   P.todoProgress(job(8, -1)).percent].join() === "7,79,82,70,100");
 ok("weights: none set counts tasks", P.todoProgress(list).percent === 25);
 const wjob = job(2, 2); wjob[2].waiting = true;
-ok("tone: running, idle, red, yellow, green", P.todoTone(job(2, 2), null, true) === "running" &&
-  P.todoTone(job(2, 2), null, false) === "idle" && P.todoTone(job(2, 2), "stopped", false) === "stopped" &&
+ok("tone: running, red, yellow, green", P.todoTone(job(2, 2), null, true) === "running" &&
+  P.todoTone(job(2, 2), "stopped", false) === "stopped" &&
   P.todoTone(job(2, 2), "failed", false) === "failed" && P.todoTone(wjob, null, true) === "waiting" &&
   P.todoTone(job(8, -1), "stopped", false) === "done");
 ok("fill: nothing animates on a list's first paint", P.freshlyDone(null, job(3, 3)).length === 0);
@@ -378,6 +378,64 @@ ok("card: an older turn's list hides", !P.planVisible(plan, { lastUserRowId: 20,
 ok("card: after sending, the old list hides", !P.planVisible(plan, { lastUserRowId: 9, floorRowId: 12, working: true }));
 ok("card: the new turn's list shows", P.planVisible({ todos: list, rowId: 12.5 }, { lastUserRowId: 9, floorRowId: 12, working: true }));
 ok("card: empty list never shows", !P.planVisible({ todos: [], rowId: 99 }, { working: true }));
+
+// Sticky bar (S53): planning / live / previous / hidden.
+const st = (p, o) => P.planState(p, o);
+ok("state: planning while working with no list this turn", st(plan, { lastUserRowId: 20, working: true }) === "planning" &&
+  st({ todos: null, rowId: 0 }, { working: true }) === "planning" &&
+  st(plan, { lastUserRowId: 9, floorRowId: 12, working: true }) === "planning");
+ok("state: live once this turn's list arrives", st({ todos: list, rowId: 12.5 }, { lastUserRowId: 9, floorRowId: 12, working: true }) === "live" &&
+  st(plan, { lastUserRowId: 9, working: true, dismissed: true }) === "live" && st(plan, { lastUserRowId: 9 }) === "live");
+ok("state: previous list after a list-free turn", st(plan, { lastUserRowId: 20 }) === "previous" &&
+  st(plan, { lastUserRowId: 9, floorRowId: 12 }) === "previous");
+ok("state: hidden when dismissed", st(plan, { lastUserRowId: 9, dismissed: true }) === "hidden" &&
+  st(plan, { lastUserRowId: 20, dismissed: true }) === "hidden" &&
+  st(plan, { lastUserRowId: 20, working: true, planningDismissed: true }) === "hidden");
+ok("state: hidden with no list and nothing running", st({ todos: [], rowId: 0 }, {}) === "hidden" && st(null, {}) === "hidden");
+
+ok("tone: open steps at turn end are yellow", P.todoTone(job(2, 2), null, false) === "waiting" &&
+  P.todoTone(job(2, -1), null, false) === "waiting" && P.todoTone(job(8, -1), null, false) === "done");
+ok("tone: red kept for stopped/failed at turn end", P.todoTone(job(2, 2), "stopped", false) === "stopped" &&
+  P.todoTone(job(2, 2), "failed", false) === "failed");
+ok("tone: running again on the next send", P.todoTone(job(2, 2), null, true) === "running");
+ok("waited on: the in-progress step, else the first pending", P.waitedOnId(job(2, 2), "waiting") === "s2" &&
+  P.waitedOnId(job(2, -1), "waiting") === "s2" && P.waitedOnId(job(2, 2), "running") === null);
+const looks = (todos, tone) => { const w = P.waitedOnId(todos, tone); return todos.map((t) => P.segLook(t, tone, w)); };
+const lw = looks(job(2, 2), "waiting");
+ok("waiting: done steps keep the accent colour, only the waited-on step is yellow",
+  lw[0].halt === null && !lw[0].error && lw[1].halt === null && lw[2].halt === "waiting" &&
+  lw.slice(3).every((l) => l.halt === null && !l.error));
+const lp = looks(job(2, -1), "waiting");
+ok("waiting with none in progress: the first pending step is yellow", lp[2].halt === "waiting" && lp[3].halt === null);
+const lr = looks(job(2, 2), "stopped");
+ok("stopped/failed: the halted step red, no per-step error marks", lr[2].halt === "stopped" &&
+  looks(job(2, 2), "failed")[2].halt === "failed" && lr.every((l) => !l.error));
+const ej = job(3, 3); ej[0].error = true; ej[3].error = true; ej[4].error = true;
+const le = looks(ej, "running");
+ok("error: that step red alone", le[0].error && le[0].halt === null && le[1].halt === null && !le[1].error &&
+  le[3].halt === "failed" && le[4].halt === "failed" && le[5].halt === null && !le[5].error);
+const ed = job(8, -1); ed[1].error = true;
+ok("error: a finished list stays green, the errored step red", P.todoTone(ed, null, false) === "done" &&
+  P.segLook(ed[1], "done", null).error && !P.segLook(ed[0], "done", null).error);
+ok("error: the list's red covers it when stopped", !P.segLook(ej[0], "stopped", null).error);
+ok("error: row shows the red cross, waited-on row the yellow bar", P.rowHalt(ej[0], "running", null) === "failed" &&
+  P.rowHalt(job(2, 2)[2], "waiting", "s2") === "waiting" && P.rowHalt(job(2, -1)[2], "waiting", "s2") === "waiting" &&
+  P.rowHalt(job(2, 2)[1], "waiting", "s2") === null && P.rowHalt(job(2, 2)[2], "stopped", null) === "stopped" &&
+  P.rowHalt(job(2, 2)[2], "running", null) === null);
+ok("error: parsed on any status but cancelled", J(P.parseTodos([{ id: "a", content: "A", status: "completed", error: true },
+  { id: "b", content: "B", status: "cancelled", error: true }, { id: "c", content: "C", status: "pending", error: "yes" }])) ===
+  J([{ id: "a", content: "A", status: "completed", error: true }, { id: "b", content: "B", status: "cancelled" },
+    { id: "c", content: "C", status: "pending" }]));
+// Merges happen in Hermes core; the card reads each write's full list, so a
+// set, a clear and a cancel show up as the newest row's flags.
+const write = (id, items) => ({ id, role: "tool", tool_name: "todo_list", content: J({ todos: items }) });
+const base = [{ id: "a", content: "A", status: "in_progress" }];
+const mset = P.latestTodos([write(1, base), write(2, [Object.assign({}, base[0], { error: true })])]);
+const mclear = P.latestTodos([write(1, base), write(2, [Object.assign({}, base[0], { error: true })]), write(3, base)]);
+const mcancel = P.latestTodos([write(2, [Object.assign({}, base[0], { error: true })]),
+  write(3, [{ id: "a", content: "A", status: "cancelled", error: true }])]);
+ok("merge: sets and clears error, cancelling drops it", mset.todos[0].error === true && !("error" in mclear.todos[0]) &&
+  !("error" in mcancel.todos[0]));
 
 const agent = [{ emoji: "\ud83d\udc4d", author: "agent" }];
 let r = P.applyReaction(agent, "\u2764\ufe0f", "user");
@@ -429,7 +487,7 @@ if node:
         js_results = json.loads(proc.stdout or "[]")
     except ValueError:
         js_results = [["node output parsed: " + (proc.stderr or proc.stdout)[:300], False]]
-    check("node ran the rules", proc.returncode == 0 and len(js_results) >= 29)
+    check("node ran the rules", proc.returncode == 0 and len(js_results) >= 47)
     for name, ok in js_results:
         check(name, ok)
 
@@ -453,6 +511,20 @@ check("no inline script or style, no on* handlers",
 check("reactions read after every history load", re.search(r"renderTranscript\(\);\s*updatePlanFromMessages\(\);\s*loadReactions\(\);", app))
 check("unseen reactions go with the next message", re.search(r"reactionNotes\(run\.profile, sessionId\)[\s\S]{0,400}instructions \}\)", app))
 check("todo step refreshes the card", "PhoneParts.isTodoTool(event.tool)) refreshPlanSoon(run, event.preview)" in app)
+css = read("page/app.css")
+check("card follows planState, Planning card wired",
+      "PhoneParts.planState(PLAN, {" in app and 'view === "planning"' in app and "paintPlanning(box, turn)" in app and
+      'now.textContent = "Planning\\u2026"' in app)
+check("Planning time ticks every second", re.search(r"setInterval\(\(\) => \{[^}]*\n  if \(!document.hidden\) tickPlanTime\(\);", app))
+check("previous list comes back folded, labelled",
+      'if (view === "previous" && PLAN.view !== "previous") PLAN.open = false;' in app and '"Previous tasks "' in app)
+check("segments and rows use segLook / rowHalt",
+      "PhoneParts.segLook(todo, tone, waitingId)" in app and "PhoneParts.rowHalt(todo, tone, waitingId)" in app)
+check("planning stripes grey, still with Reduce Motion",
+      ".plan-seg.planning {" in css and "var(--muted-fg)" in css.split(".plan-seg.planning {")[1].split("}")[0] and
+      re.search(r"prefers-reduced-motion[^\n]*\.plan-seg\.planning", css))
+check("waiting no longer tints the done segments", ".plan.tone-waiting { --seg" not in css and ".plan-seg.halt-waiting" in css)
+check("errored done step red", ".plan-seg.completed.error { --seg: #f85149; }" in css)
 check("pin and archive use Hermes's PATCH", re.search(r'method: "PATCH",\s*body: JSON.stringify\(\{ \[flag\]: value \}\)', app))
 check("phone turns told reactions cannot attach yet", "react_to_message) cannot attach" in app)
 check("search results replace the list", re.search(r"if \(searching\(\)\) \{\s*renderSearch\(root\)", app))

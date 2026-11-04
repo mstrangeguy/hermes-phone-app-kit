@@ -38,6 +38,9 @@
           : typeof item.weight === "string" && item.weight.trim() ? Number(item.weight) : NaN;
         if (isFinite(weight)) row.weight = Math.max(1, Math.min(100, Math.round(weight)));
         if (item.waiting === true && item.status === "in_progress") row.waiting = true;
+        // Per-step error (Hermes core S53): the step hit an error while the job
+        // went on. Any status but cancelled (a cancelled step drops it).
+        if (item.error === true && item.status !== "cancelled") row.error = true;
         out.push(row);
       }
       return out;
@@ -101,14 +104,52 @@
   }
 
   // The card's colour: "done" (green), "failed"/"stopped" (red, from how the
-  // reply ended), "waiting" (yellow, the step waits on you), else "running"
-  // while a reply works or "idle".
+  // reply ended), "waiting" (yellow: the step waits on you, or the reply ended
+  // with steps still open, which almost always means a question to you), else
+  // "running" while a reply works. "idle" is left only for an empty list.
   function todoTone(todos, outcome, working) {
     const prog = todoProgress(todos);
     if (prog.total > 0 && prog.open === 0) return "done";
     if (outcome === "failed" || outcome === "stopped") return outcome;
     if (prog.current && prog.current.waiting) return "waiting";
-    return working ? "running" : "idle";
+    if (working) return "running";
+    return prog.open > 0 ? "waiting" : "idle";
+  }
+
+  // The step a "waiting" list waits on: the in-progress one, or the first
+  // pending one when the reply ended with none in progress. Null otherwise.
+  function waitedOnId(todos, tone) {
+    if (tone !== "waiting") return null;
+    const list = Array.isArray(todos) ? todos : [];
+    const step = list.find((t) => t.status === "in_progress") || list.find((t) => t.status === "pending");
+    return step ? step.id : null;
+  }
+
+  // One bar segment's look, after the desktop's TodoProgressBar (S53):
+  // {halt, error}. halt is "waiting" (yellow outline, only the step waited on),
+  // "failed"/"stopped" (red outline: the step a stopped or failed list halted
+  // on, or an errored step not yet done), or null. error is true for a step
+  // marked error while the list is not already all red; a completed one fills
+  // red. Finished steps otherwise keep the accent colour (green when done).
+  function segLook(todo, tone, waitingId) {
+    const listRed = tone === "failed" || tone === "stopped";
+    const error = Boolean(todo && todo.error) && todo.status !== "cancelled" && !listRed;
+    let halt = null;
+    if (todo && waitingId != null && todo.id === waitingId) halt = "waiting";
+    else if (todo && todo.status === "in_progress") halt = listRed ? tone : error ? "failed" : null;
+    else if (todo && todo.status === "pending" && error) halt = "failed";
+    return { halt, error };
+  }
+
+  // A task row's mark: "failed"/"stopped" (red ✕), "waiting" (yellow ‖) or
+  // null (its normal mark). An errored step shows the red ✕ whatever its
+  // status (the desktop's row rule), the step waited on the yellow ‖.
+  function rowHalt(todo, tone, waitingId) {
+    if (!todo || todo.status === "cancelled") return null;
+    if (todo.error) return "failed";
+    if (waitingId != null && todo.id === waitingId) return "waiting";
+    if (todo.status === "in_progress" && (tone === "failed" || tone === "stopped" || tone === "waiting")) return tone;
+    return null;
   }
 
   // Steps that turned completed since the last paint (they get the 1 s fill).
@@ -156,6 +197,23 @@
     if (plan.rowId <= (Number(o.floorRowId) || 0)) return false;
     if (plan.rowId <= (Number(o.lastUserRowId) || 0)) return false;
     return Boolean(o.working) || !o.dismissed;
+  }
+
+  // What the card shows (S53 sticky bar):
+  //   "live"     this turn's list (as planVisible);
+  //   "planning" a reply runs and this turn has no list yet (grey stripes,
+  //              elapsed time), unless closed for this turn;
+  //   "previous" the reply is over and wrote no list: the newest earlier
+  //              list comes back, folded, unless that list was closed;
+  //   "hidden"   nothing to show.
+  function planState(plan, opts) {
+    const o = opts || {};
+    const hasList = Boolean(plan) && Array.isArray(plan.todos) && plan.todos.length > 0;
+    if (hasList && plan.rowId > (Number(o.floorRowId) || 0) && plan.rowId > (Number(o.lastUserRowId) || 0)) {
+      return o.working || !o.dismissed ? "live" : "hidden";
+    }
+    if (o.working) return o.planningDismissed ? "hidden" : "planning";
+    return hasList && !o.dismissed ? "previous" : "hidden";
   }
 
   // The six iOS Tapbacks, in Apple's order (the desktop's QUICK_REACTIONS).
@@ -301,7 +359,7 @@
 
   root.PhoneParts = {
     TODO_TOOLS, isTodoTool, parseTodos, todoTree, todoProgress, todoWeight, todoTone, runOutcome, freshlyDone,
-    latestTodos, planVisible,
+    latestTodos, planVisible, planState, waitedOnId, segLook, rowHalt,
     QUICK_REACTIONS, applyReaction, mine, tapDetector, searchRows,
     gatewayRoute, coreText, gatewayProgress, gatewayStep,
     QUICK_ANSWERS, quickReplies

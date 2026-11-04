@@ -18,9 +18,13 @@ Store app and no cloud service. Setup and settings: [README.md](README.md).
   (for example "3/7") and the current step; tap it for the whole list.
   The headline is a weighted % (steps Hermes marks as bigger count more) with the step count
   beside it, over a bar with one segment per step. It turns red with Stopped or Failed when a
-  reply started on the phone ends early, yellow with Waiting on you when Hermes is waiting for
-  your answer, green when done. The running step's stripes move, and a finished step fills in
-  over a second.
+  reply started on the phone ends early (every segment red), and green when done. When Hermes
+  waits for your answer, or a reply ends with steps still open, it says Waiting on you and only
+  the step it waits on turns yellow; finished steps keep the normal colour. A step that hit an
+  error while the job went on is red on its own. The running step's stripes move, and a
+  finished step fills in over a second. The card stays put: while a reply runs and has no task
+  list yet it says "Planning…" with moving grey stripes and the time so far, and a reply that
+  writes no list brings the previous one back, folded, as "Previous tasks".
 - **"Files changed" card** for each reply that edited files, like the desktop's.
 - **One-tap answers.** When Hermes asks a plain yes/no question, **Yes, go ahead** and **Not
   now** buttons appear. Never shown for locks, the alarm, the thermostat, the garage, a siren or
