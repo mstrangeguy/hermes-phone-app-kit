@@ -5533,15 +5533,17 @@ function paintPlan() {
   const now = document.createElement("span");
   now.className = "plan-now";
   const tag = { failed: "Failed", stopped: "Stopped", waiting: "Waiting on you" }[tone];
-  const step = prog.current ? prog.current.content : (prog.open + " to go");
-  const what = previous ? "Previous tasks " + prog.done + "/" + prog.total : finished ? "All done" : step;
-  if (tag && !finished) {
+  // Header: count, tag, %. The step's name gets its own line under the bar (S53 3c).
+  const stepText = previous ? null : PhoneParts.stepName(PLAN.todos, tone);
+  if (previous) {
+    now.textContent = "Previous tasks " + prog.done + "/" + prog.total;
+  } else if (finished) {
+    now.textContent = "All done";
+  } else if (tag) {
     const tagNode = document.createElement("span");
     tagNode.className = "plan-tag";
     tagNode.textContent = tag;
-    now.append(tagNode, " \u00b7 " + what);
-  } else {
-    now.textContent = what;
+    now.append(tagNode);
   }
   const chev = document.createElement("span");
   chev.className = "chev";
@@ -5549,7 +5551,7 @@ function paintPlan() {
   chev.textContent = "\u203a";
   head.append(icon, count, now, chev);
   head.setAttribute("aria-label", (previous ? "Previous tasks: " : "Tasks: ") + prog.percent + " percent, " + prog.done + " of " + prog.total + " done" +
-    (tag ? ", " + tag : "") + (prog.current ? ", now: " + prog.current.content : ""));
+    (tag ? ", " + tag : "") + (stepText ? ", step: " + stepText : ""));
   head.addEventListener("click", () => {
     PLAN.open = !PLAN.open;
     paintPlan();
@@ -5594,6 +5596,12 @@ function paintPlan() {
     top.append(close);
   }
   box.append(top, bar);
+  if (stepText) {
+    const stepLine = document.createElement("div");
+    stepLine.className = "plan-step";
+    stepLine.textContent = stepText;
+    box.append(stepLine);
+  }
   if (PLAN.open) {
     const body = document.createElement("div");
     body.className = "plan-body";

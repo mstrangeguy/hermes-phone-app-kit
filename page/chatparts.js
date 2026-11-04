@@ -125,6 +125,22 @@
     return step ? step.id : null;
   }
 
+  // The step the card names on its line under the bar (S53, item 3c): running,
+  // the in-progress step (none between steps); waiting / stopped / failed, the
+  // in-progress step, else the first pending one; finished, nothing. Returns
+  // the step's text or null.
+  function stepName(todos, tone) {
+    const list = (Array.isArray(todos) ? todos : []).filter((t) => t.status !== "cancelled");
+    if (!list.some((t) => t.status === "pending" || t.status === "in_progress")) return null;
+    const running = list.find((t) => t.status === "in_progress");
+    if (running) return running.content || null;
+    if (tone === "waiting" || tone === "stopped" || tone === "failed") {
+      const next = list.find((t) => t.status === "pending");
+      return next ? next.content || null : null;
+    }
+    return null;
+  }
+
   // One bar segment's look, after the desktop's TodoProgressBar (S53):
   // {halt, error}. halt is "waiting" (yellow outline, only the step waited on),
   // "failed"/"stopped" (red outline: the step a stopped or failed list halted
@@ -359,7 +375,7 @@
 
   root.PhoneParts = {
     TODO_TOOLS, isTodoTool, parseTodos, todoTree, todoProgress, todoWeight, todoTone, runOutcome, freshlyDone,
-    latestTodos, planVisible, planState, waitedOnId, segLook, rowHalt,
+    latestTodos, planVisible, planState, waitedOnId, stepName, segLook, rowHalt,
     QUICK_REACTIONS, applyReaction, mine, tapDetector, searchRows,
     gatewayRoute, coreText, gatewayProgress, gatewayStep,
     QUICK_ANSWERS, quickReplies

@@ -830,6 +830,8 @@ button.bucket.group::after { order: 3; }
 .plan-seg.planning { background: repeating-linear-gradient(45deg, color-mix(in srgb, var(--muted-fg) 55%, transparent) 0 4px, color-mix(in srgb, var(--muted-fg) 20%, transparent) 4px 8px);
   background-size: 11.31px 11.31px; animation: plan-march 0.8s linear infinite; }
 .plan-time { flex: none; color: var(--muted-fg); font-size: 12px; font-variant-numeric: tabular-nums; }
+/* The step the card is on (S53 3c): one muted line under the bar, cut with an ellipsis. */
+.plan-step { margin-top: -3px; padding: 0 10px 8px; font-size: 12px; color: var(--muted-fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .plan.planning .plan-ico { color: var(--muted-fg); }
 .plan-seg.completed.fresh { background: color-mix(in srgb, var(--border) 85%, transparent); }
 .plan-seg.completed.fresh::after { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 100%; border-radius: 2px;

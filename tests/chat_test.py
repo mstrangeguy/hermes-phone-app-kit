@@ -400,6 +400,14 @@ ok("tone: red kept for stopped/failed at turn end", P.todoTone(job(2, 2), "stopp
 ok("tone: running again on the next send", P.todoTone(job(2, 2), null, true) === "running");
 ok("waited on: the in-progress step, else the first pending", P.waitedOnId(job(2, 2), "waiting") === "s2" &&
   P.waitedOnId(job(2, -1), "waiting") === "s2" && P.waitedOnId(job(2, 2), "running") === null);
+const named = (todos, tone) => P.stepName(todos, tone);
+const jn = job(2, 2);
+ok("step name: running names the in-progress step", named(jn, "running") === jn[2].content);
+ok("step name: none between steps while running", named(job(2, -1), "running") === null);
+ok("step name: waiting / stopped / failed name the in-progress step, else the first pending",
+  named(jn, "waiting") === jn[2].content && named(jn, "stopped") === jn[2].content &&
+  named(job(2, -1), "waiting") === job(2, -1)[2].content && named(job(2, -1), "failed") === job(2, -1)[2].content);
+ok("step name: finished list names nothing", named(job(8, -1), "done") === null && named([], "running") === null);
 const looks = (todos, tone) => { const w = P.waitedOnId(todos, tone); return todos.map((t) => P.segLook(t, tone, w)); };
 const lw = looks(job(2, 2), "waiting");
 ok("waiting: done steps keep the accent colour, only the waited-on step is yellow",
@@ -525,6 +533,10 @@ check("planning stripes grey, still with Reduce Motion",
       re.search(r"prefers-reduced-motion[^\n]*\.plan-seg\.planning", css))
 check("waiting no longer tints the done segments", ".plan.tone-waiting { --seg" not in css and ".plan-seg.halt-waiting" in css)
 check("errored done step red", ".plan-seg.completed.error { --seg: #f85149; }" in css)
+check("step name on its own line under the bar, header keeps count, tag, %",
+      "PhoneParts.stepName(PLAN.todos, tone)" in app and 'stepLine.className = "plan-step"' in app and
+      "box.append(top, bar);\n  if (stepText)" in app and ".plan-step {" in css and
+      "text-overflow: ellipsis" in css.split(".plan-step {")[1].split("}")[0])
 check("pin and archive use Hermes's PATCH", re.search(r'method: "PATCH",\s*body: JSON.stringify\(\{ \[flag\]: value \}\)', app))
 check("phone turns told reactions cannot attach yet", "react_to_message) cannot attach" in app)
 check("search results replace the list", re.search(r"if \(searching\(\)\) \{\s*renderSearch\(root\)", app))

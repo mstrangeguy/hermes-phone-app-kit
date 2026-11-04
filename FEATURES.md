@@ -15,7 +15,8 @@ Store app and no cloud service. Setup and settings: [README.md](README.md).
   Photos are shrunk on the phone and lose their location data; files up to 25 MB. Pictures
   Hermes sends back show in the chat with pinch-to-zoom.
 - **Task list card.** When Hermes keeps a task list, a card above the message box shows progress
-  (for example "3/7") and the current step; tap it for the whole list.
+  (for example "3/7") and, on its own line under the bar, the name of the step it's on (the one
+  running, or the one it waits on); tap it for the whole list.
   The headline is a weighted % (steps Hermes marks as bigger count more) with the step count
   beside it, over a bar with one segment per step. It turns red with Stopped or Failed when a
   reply started on the phone ends early (every segment red), and green when done. When Hermes
