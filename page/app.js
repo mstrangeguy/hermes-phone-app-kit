@@ -2501,6 +2501,7 @@ async function openSession(id, title, push, profile) {
   if (push) history.pushState({ id, profile: state.profile }, "", hashFor(id, state.profile));
   show("chat-screen");
   $("transcript").textContent = "";
+  updateDatePin();
   const status = document.createElement("div");
   status.className = "status-line";
   status.textContent = "Loading…";
@@ -2787,6 +2788,7 @@ function dayDivider(key, nowMs) {
   if (!hit) {
     const node = document.createElement("div");
     node.className = "day-divider";
+    node.dataset.day = key;
     node.setAttribute("role", "separator");
     const left = document.createElement("span");
     left.className = "day-line";
@@ -2799,19 +2801,74 @@ function dayDivider(key, nowMs) {
     dividerNodes.set(key, hit);
   }
   if (hit.text !== label.text) {
-    hit.cap.textContent = "";
-    if (label.prefix) {
-      const pre = document.createElement("span");
-      pre.className = "day-pre";
-      pre.textContent = label.prefix;
-      hit.cap.append(pre, " \u00b7 " + label.date);
-    } else {
-      hit.cap.textContent = label.date;
-    }
+    paintDayCap(hit.cap, label);
     hit.node.setAttribute("aria-label", label.text);
     hit.text = label.text;
   }
   return hit.node;
+}
+
+function paintDayCap(cap, label) {
+  cap.textContent = "";
+  if (label.prefix) {
+    const pre = document.createElement("span");
+    pre.className = "day-pre";
+    pre.textContent = label.prefix;
+    cap.append(pre, " \u00b7 " + label.date);
+  } else {
+    cap.textContent = label.date;
+  }
+}
+
+// --- Pinned date line (S57) --------------------------------------------------
+// The line of the day you're reading stays at the top of the transcript; the
+// next day's line pushes it up and off. One overlay outside the scroller
+// (#date-pin, pointer-events none, so taps reach the messages under it), its
+// text from dividerLabel and its offset set through the CSSOM (the page's CSP
+// blocks style="" in markup, not element.style). PhoneParts.resolveDatePin
+// decides; this only reads the day lines' positions and paints.
+const DATE_PIN = { frame: 0, day: null, text: null, shift: null, height: 0 };
+
+function updateDatePin() {
+  DATE_PIN.frame = 0;
+  const pin = $("date-pin");
+  const root = $("transcript");
+  if (!pin || !root) return;
+  const band = pin.firstElementChild;
+  const rootTop = root.getBoundingClientRect().top;
+  const openers = [];
+  for (const node of root.querySelectorAll(":scope > .day-divider[data-day]")) {
+    openers.push({ day: node.dataset.day, top: node.getBoundingClientRect().top - rootTop });
+  }
+  // A line counts as at the top when it reaches where the pinned one draws
+  // its own line, so the hand-over doesn't jump. A hidden band measures 0:
+  // use its last shown height.
+  const line = parseFloat(getComputedStyle(band).paddingTop) || 0;
+  const height = pin.hidden ? DATE_PIN.height : band.offsetHeight;
+  const look = PhoneParts.resolveDatePin(openers, line, height);
+  if (!look.day) {
+    pin.hidden = true;
+    DATE_PIN.day = null;
+    return;
+  }
+  const label = PhoneParts.dividerLabel(look.day, Date.now());
+  if (DATE_PIN.day !== look.day || DATE_PIN.text !== label.text) {
+    paintDayCap(pin.querySelector(".day-cap"), label);
+    DATE_PIN.day = look.day;
+    DATE_PIN.text = label.text;
+  }
+  if (DATE_PIN.shift !== look.shift) {
+    band.style.transform = look.shift ? "translateY(" + look.shift + "px)" : "";
+    DATE_PIN.shift = look.shift;
+  }
+  pin.hidden = false;
+  DATE_PIN.height = band.offsetHeight;
+}
+
+function scheduleDatePin() {
+  if (DATE_PIN.frame) return;
+  if (!window.requestAnimationFrame) return updateDatePin();
+  DATE_PIN.frame = requestAnimationFrame(updateDatePin);
 }
 
 function renderTranscript(opts) {
@@ -2890,6 +2947,7 @@ function renderTranscript(opts) {
   else root.scrollTop = stick ? root.scrollHeight : top;
   paintDraftHint();
   paintQuick();
+  updateDatePin();
 }
 
 function paintDraftHint() {
@@ -5515,6 +5573,7 @@ $("transcript").addEventListener("pointerup", (event) => {
 });
 // A real scroll closes it; the small nudges of a reload or a layout change do not.
 $("transcript").addEventListener("scroll", () => {
+  scheduleDatePin();
   const bar = $("tapback");
   if (bar && Math.abs($("transcript").scrollTop - Number(bar.dataset.top || 0)) > 12) closeTapback();
 }, { passive: true });

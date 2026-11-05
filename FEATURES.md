@@ -36,7 +36,8 @@ Store app and no cloud service. Setup and settings: [README.md](README.md).
 - **Long messages fold.** Long messages you sent fold to a few lines with **Show all**, like the
   desktop's.
 - **Date dividers.** Long chats show the date above the first message of each day (Today and
-  Yesterday by name), like the desktop's.
+  Yesterday by name), like the desktop's. The day you're reading stays pinned at the top while you
+  scroll; the next day's date pushes it off.
 - **Send into Desktop chats** (Hermes v0.22+). Text and pictures go into any chat; the reply
   appears when Hermes saves it.
 

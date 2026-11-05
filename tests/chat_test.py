@@ -552,6 +552,22 @@ ok("label: worked out against the time it is painted (midnight turns Today into 
   lab("2026-11-04", new Date(2026, 10, 4, 23, 59).getTime()).prefix === "Today" &&
   lab("2026-11-04", new Date(2026, 10, 5, 0, 0).getTime()).prefix === "Yesterday");
 ok("label: bad key gives nothing", lab("nope", NOW).text === "" && lab(null, NOW).text === "");
+
+// Pinned date line (S57). Tops from the transcript's visible top; line 4, band 26.
+const pin = (openers) => J(P.resolveDatePin(openers, 4, 26));
+const D = (day, top) => ({ day, top });
+ok("pin: nothing pinned at the very top of a chat", pin([D("2026-11-02", 26), D("2026-11-03", 600)]) === J({ day: "", shift: 0 }));
+ok("pin: the day you scrolled into is pinned", pin([D("2026-11-02", -120), D("2026-11-03", 600)]) === J({ day: "2026-11-02", shift: 0 }) &&
+  pin([D("2026-11-02", 4), D("2026-11-03", 600)]) === J({ day: "2026-11-02", shift: 0 }));
+ok("pin: the latest passed day wins", pin([D("2026-11-01", -900), D("2026-11-02", -300), D("2026-11-03", 500)]) ===
+  J({ day: "2026-11-02", shift: 0 }));
+ok("pin: the next line pushes the pinned one up", pin([D("2026-11-02", -200), D("2026-11-03", 20)]) === J({ day: "2026-11-02", shift: -10 }) &&
+  pin([D("2026-11-02", -200), D("2026-11-03", 30)]) === J({ day: "2026-11-02", shift: 0 }));
+ok("pin: hand-over when the next line reaches the top, never two",
+  pin([D("2026-11-02", -200), D("2026-11-03", 4.5)]) === J({ day: "2026-11-02", shift: -25.5 }) &&
+  pin([D("2026-11-02", -200), D("2026-11-03", 4)]) === J({ day: "2026-11-03", shift: 0 }));
+ok("pin: no lines (or junk) pins nothing", pin([]) === J({ day: "", shift: 0 }) && J(P.resolveDatePin(null, 4, 26)) === J({ day: "", shift: 0 }) &&
+  pin([{ day: "2026-11-02" }, null, D("2026-11-03", "x")]) === J({ day: "", shift: 0 }));
 process.stdout.write(JSON.stringify(out));
 """
 
@@ -680,6 +696,25 @@ check("dividers: centred hairline look, Today/Yesterday in the accent colour",
       ".day-line { flex: 1; height: 1px; background: var(--border); }" in css and
       ".day-cap { font-size: 12px; font-weight: 600; color: var(--muted-fg); white-space: nowrap; }" in css and
       ".day-pre { color: var(--primary); }" in css)
+pin_src = app.split("function updateDatePin() {")[1].split("\n}\n")[0] if "function updateDatePin() {" in app else ""
+check("pin: one overlay outside the scroller, before it, no taps, hidden at first",
+      re.search(r'<div class="date-pin-host">\s*<div class="date-pin" id="date-pin" aria-hidden="true" hidden>'
+                r'<div class="date-pin-band"><div class="day-divider">[\s\S]*?</div>\s*<div class="transcript" id="transcript">', html) and
+      ".date-pin-host { position: relative; height: 0; z-index: 5; pointer-events: none; }" in css and
+      "pointer-events: none" in css.split(".date-pin {")[1].split("}")[0] and "overflow: hidden" in css.split(".date-pin {")[1].split("}")[0])
+check("pin: solid transcript background, same look as the in-flow line",
+      "background: var(--bg)" in css.split(".date-pin-band {")[1].split("}")[0] and ".date-pin-band .day-divider { margin: 0; }" in css)
+check("pin: rule from PhoneParts.resolveDatePin, label from dividerLabel, shared cap painter",
+      "PhoneParts.resolveDatePin(openers, line, height)" in pin_src and "PhoneParts.dividerLabel(look.day, Date.now())" in pin_src and
+      'paintDayCap(pin.querySelector(".day-cap"), label)' in pin_src and "paintDayCap(hit.cap, label);" in app)
+check("pin: reads only the day lines' positions; offset set through the CSSOM",
+      ':scope > .day-divider[data-day]' in pin_src and "node.dataset.day = key;" in app and
+      'band.style.transform = look.shift ? "translateY(" + look.shift + "px)" : ""' in pin_src)
+check("pin: re-measured on scroll (one frame at a time), after each render and on a chat switch",
+      "scheduleDatePin();\n  const bar = $(\"tapback\");" in app and "if (DATE_PIN.frame) return;" in app and
+      "DATE_PIN.frame = requestAnimationFrame(updateDatePin);" in app and
+      render_src.rstrip().endswith("updateDatePin();") and
+      '$("transcript").textContent = "";\n  updateDatePin();' in app)
 check("new endpoints are local, not forwarded",
       all(p in serve.LOCAL_API for p in (serve.REACTIONS_PATH, serve.REACTIONS_UNSEEN_PATH, serve.SEARCH_PATH)))
 

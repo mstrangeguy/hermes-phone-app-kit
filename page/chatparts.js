@@ -456,8 +456,32 @@
     });
   }
 
+  // Which day's line is pinned at the top of the transcript (S57), and how far
+  // it is pushed up. `openers` are the day lines in transcript order, each
+  // {day, top} with top measured from the transcript's visible top; `line` is
+  // where a line counts as having reached the top; `height` is the pinned
+  // band's height. `day` is the last line at or above `line` ("" when none, so
+  // nothing pins at the very top of a chat). While the next line is closer than
+  // `height` below `line`, `shift` (negative) moves the pinned one up and off,
+  // so two are never pinned at once.
+  function resolveDatePin(openers, line, height) {
+    const list = Array.isArray(openers) ? openers : [];
+    const at = typeof line === "number" && isFinite(line) ? line : 0;
+    const tall = typeof height === "number" && isFinite(height) && height > 0 ? height : 0;
+    let index = -1;
+    for (let i = 0; i < list.length; i++) {
+      const top = list[i] && typeof list[i].top === "number" ? list[i].top : NaN;
+      if (isFinite(top) && top <= at) index = i;
+    }
+    if (index < 0) return { day: "", shift: 0 };
+    let shift = 0;
+    const next = list[index + 1];
+    if (next && typeof next.top === "number" && isFinite(next.top) && next.top - at < tall) shift = next.top - at - tall;
+    return { day: String(list[index].day || ""), shift };
+  }
+
   root.PhoneParts = {
-    messageMs, dayKey, dividerLabel, dayBreaks,
+    messageMs, dayKey, dividerLabel, dayBreaks, resolveDatePin,
     CLAMP_LINES, clampState, copyText,
     TODO_TOOLS, isTodoTool, parseTodos, todoTree, todoProgress, todoWeight, todoTone, runOutcome, freshlyDone,
     latestTodos, planVisible, planState, waitedOnId, stepName, segLook, rowHalt,

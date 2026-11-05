@@ -215,6 +215,15 @@ input[type="password"]:focus, input.code:focus, textarea:focus { border-color: v
 .day-line { flex: 1; height: 1px; background: var(--border); }
 .day-cap { font-size: 12px; font-weight: 600; color: var(--muted-fg); white-space: nowrap; }
 .day-pre { color: var(--primary); }
+/* Pinned date line (S57): the line of the day you're reading stays at the
+   top of the transcript, on the transcript's solid background so nothing
+   shows through. The host takes no room and ignores taps; the pin clips its
+   band, so a band being pushed off slides away under its own top edge. */
+.date-pin-host { position: relative; height: 0; z-index: 5; pointer-events: none; }
+.date-pin { position: absolute; top: 0; left: 0; right: 0; overflow: hidden; pointer-events: none; }
+.date-pin[hidden] { display: none; }
+.date-pin-band { background: var(--bg); padding: 4px 14px 6px; }
+.date-pin-band .day-divider { margin: 0; }
 .pull-tip { height: 0; overflow: hidden; display: flex; align-items: center; justify-content: center; gap: 8px;
   background: var(--sidebar); color: var(--muted-fg); font-size: 13px; flex: none; transition: height 0.15s ease-out; }
 .pull-spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--border);
