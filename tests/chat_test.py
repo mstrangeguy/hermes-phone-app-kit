@@ -715,6 +715,19 @@ check("pin: re-measured on scroll (one frame at a time), after each render and o
       "DATE_PIN.frame = requestAnimationFrame(updateDatePin);" in app and
       render_src.rstrip().endswith("updateDatePin();") and
       '$("transcript").textContent = "";\n  updateDatePin();' in app)
+# Classic scripts share one global scope: a second top-level function with the
+# same name silently replaces the first everywhere (the clockTime bug: the
+# Status screen lost the seconds on its "Refreshed" time).
+tops = {}
+for rel in ("page/lists.js", "page/app.js"):
+    for name in re.findall(r"^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(", read(rel), re.M):
+        tops.setdefault(name, []).append(rel)
+dupes = sorted(n for n, where in tops.items() if len(where) > 1)
+check("no top-level function is defined twice across the page's classic scripts" + (" (" + ", ".join(dupes) + ")" if dupes else ""),
+      not dupes)
+check("refresh times keep their seconds (refreshClock), cron keeps clockTime",
+      "function refreshClock(ms)" in app and 'second: "2-digit"' in app.split("function refreshClock(ms)")[1].split("\n}\n")[0] and
+      '"Refreshed " + refreshClock(STATUS.refreshedAt)' in app and '"Updated " + refreshClock(Date.now())' in app)
 check("new endpoints are local, not forwarded",
       all(p in serve.LOCAL_API for p in (serve.REACTIONS_PATH, serve.REACTIONS_UNSEEN_PATH, serve.SEARCH_PATH)))
 

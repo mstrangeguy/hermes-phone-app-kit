@@ -1561,7 +1561,11 @@ async function refreshStatus() {
   }
 }
 
-function clockTime(ms) {
+// "Refreshed 3:27:05 PM": a refresh shows its seconds, so a second tap visibly
+// changes it. Not named clockTime: that one (cron, below) is a different
+// format, and in a classic script the later function of a name silently
+// replaces the earlier one everywhere.
+function refreshClock(ms) {
   return new Date(ms).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
 }
 
@@ -1630,8 +1634,8 @@ function renderStatus() {
     const when = document.createElement("div");
     when.className = "status-when";
     const data = stampOf(STATUS.updated);
-    when.textContent = "Refreshed " + clockTime(STATUS.refreshedAt) +
-      (data && !STATUS.stale ? " · monitor data from " + clockTime(data) : "");
+    when.textContent = "Refreshed " + refreshClock(STATUS.refreshedAt) +
+      (data && !STATUS.stale ? " · monitor data from " + refreshClock(data) : "");
     root.append(when);
   }
   root.scrollTop = scroll;
@@ -3072,7 +3076,7 @@ function userBubble(text, steer, sources, key) {
     if (parsed.paths.length || parsed.files.length) {
       shown = parsed.text;
       attached = parsed.paths.map((path) => ({ kind: "image", path }))
-        .concat(parsed.files.map((path) => ({ kind: "file", name: baseName(path) })));
+        .concat(parsed.files.map((path) => ({ kind: "file", name: chipName(path) })));
     }
   }
   const bubble = document.createElement("div");
@@ -3103,7 +3107,9 @@ function userBubble(text, steer, sources, key) {
   return wrap;
 }
 
-function baseName(path) {
+// A file chip's name. Its own name: a second top-level baseName replaced the
+// tool-summary one at the top of this file everywhere.
+function chipName(path) {
   return String(path || "").split("/").filter(Boolean).pop() || "file";
 }
 
@@ -6129,7 +6135,7 @@ function pullToRefresh(listId, refresh) {
     busy = true;
     set(40, "Refreshing…", true);
     const started = Date.now();
-    let text = "Updated " + clockTime(Date.now());
+    let text = "Updated " + refreshClock(Date.now());
     try {
       await refresh();
     } catch (e) {
