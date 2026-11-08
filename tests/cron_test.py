@@ -266,6 +266,11 @@ check("status: an hour-old file is stale", call("/phone-api/status")[1]["stale"]
 with open(serve.CONFIG_PATH, "w") as handle:
     json.dump({"status": {"enabled": True, "file": cards_path, "start": False}}, handle)
 check("status: start false keeps the session list first", call("/phone-api/profiles")[1]["status_start"] is False)
+check("clock: unset is the phone's own default", call("/phone-api/profiles")[1].get("clock") == "")
+for value, want in (("24h", "24h"), ("12h", "12h"), ("24", ""), (24, ""), (None, "")):
+    with open(serve.CONFIG_PATH, "w") as handle:
+        json.dump({"clock": value}, handle)
+    check("clock: config %r -> %r" % (value, want), call("/phone-api/profiles")[1].get("clock") == want)
 check("status: needs the key", call("/phone-api/status", key="wrong")[0] == 401)
 os.remove(serve.CONFIG_PATH)
 

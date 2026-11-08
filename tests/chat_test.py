@@ -568,6 +568,49 @@ ok("pin: hand-over when the next line reaches the top, never two",
   pin([D("2026-11-02", -200), D("2026-11-03", 4)]) === J({ day: "2026-11-03", shift: 0 }));
 ok("pin: no lines (or junk) pins nothing", pin([]) === J({ day: "", shift: 0 }) && J(P.resolveDatePin(null, 4, 26)) === J({ day: "", shift: 0 }) &&
   pin([{ day: "2026-11-02" }, null, D("2026-11-03", "x")]) === J({ day: "", shift: 0 }));
+
+// Message times, after the desktop's formatMessageTimestamp. Expected
+// strings come from the same Intl calls, so any locale and time zone works.
+const ms = (y, mo, d, h, mi) => new Date(y, mo - 1, d, h, mi || 0).getTime();
+const clk = (t, extra) => new Date(t).toLocaleTimeString(undefined, Object.assign({ hour: "numeric", minute: "2-digit" }, extra || {}));
+const dayClk = (t, extra) => new Date(t).toLocaleString(undefined, Object.assign({ month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }, extra || {}));
+const H23 = { hourCycle: "h23" };
+ok("time: today is the clock only", P.stampLabel(ms(2026, 11, 4, 9, 5), NOW, "") === clk(ms(2026, 11, 4, 9, 5)));
+ok("time: yesterday says so", P.stampLabel(ms(2026, 11, 3, 22, 40), NOW, "") === "Yesterday, " + clk(ms(2026, 11, 3, 22, 40)));
+ok("time: older is month, day and clock, no year (as the desktop)", P.stampLabel(ms(2026, 11, 2, 15, 27), NOW, "") === dayClk(ms(2026, 11, 2, 15, 27)) &&
+  P.stampLabel(ms(2025, 6, 1, 8), NOW, "") === dayClk(ms(2025, 6, 1, 8)) && !/2025/.test(P.stampLabel(ms(2025, 6, 1, 8), NOW, "")));
+ok("time: ahead of now is dated, not Today", P.stampLabel(ms(2026, 11, 6, 9), NOW, "") === dayClk(ms(2026, 11, 6, 9)));
+ok("time: 24h setting gives the desktop's 15:27", P.stampLabel(ms(2026, 11, 4, 15, 27), NOW, "24h") === clk(ms(2026, 11, 4, 15, 27), H23) &&
+  (!/^en/i.test(Intl.DateTimeFormat().resolvedOptions().locale) || P.stampLabel(ms(2026, 11, 4, 15, 27), NOW, "24h") === "15:27") &&
+  P.stampLabel(ms(2026, 11, 3, 15, 27), NOW, "24h") === "Yesterday, " + clk(ms(2026, 11, 3, 15, 27), H23));
+ok("time: 12h setting has AM/PM in en", !/^en/i.test(Intl.DateTimeFormat().resolvedOptions().locale) ||
+  /PM/.test(P.stampLabel(ms(2026, 11, 4, 15, 27), NOW, "12h")));
+ok("time: unknown setting is the phone's default", J(P.clockOptions("25h")) === "{}" && J(P.clockOptions(undefined)) === "{}" &&
+  J(P.clockOptions("24h")) === J(H23) && J(P.clockOptions("12h")) === J({ hour12: true }));
+ok("time: midnight turns Today into Yesterday at paint time", P.stampLabel(ms(2026, 11, 4, 23, 59), ms(2026, 11, 4, 23, 59, 30), "") === clk(ms(2026, 11, 4, 23, 59)) &&
+  P.stampLabel(ms(2026, 11, 4, 23, 59), ms(2026, 11, 5, 0, 1), "").indexOf("Yesterday, ") === 0);
+ok("time: Yesterday across a month and a year end", P.stampLabel(ms(2026, 10, 31, 20), ms(2026, 11, 1, 1), "").indexOf("Yesterday, ") === 0 &&
+  P.stampLabel(ms(2025, 12, 31, 20), ms(2026, 1, 1, 1), "").indexOf("Yesterday, ") === 0);
+ok("time: no time, no label", [undefined, null, 0, -1, NaN, "x"].every((t) => P.stampLabel(t, NOW, "") === "" && P.stampDetail(t, NOW, "") === ""));
+const fullOf = (t, extra) => new Date(t).toLocaleString(undefined, Object.assign({ dateStyle: "full", timeStyle: "short" }, extra || {}));
+const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: "auto", style: "short" });
+ok("tip: within a day, age then the full date (desktop's tip)", P.stampDetail(NOW - 5 * 60000, NOW, "") === rtf.format(-5, "minute") + " \u00b7 " + fullOf(NOW - 5 * 60000) &&
+  P.stampDetail(NOW - 3 * 3600000, NOW, "24h") === rtf.format(-3, "hour") + " \u00b7 " + fullOf(NOW - 3 * 3600000, H23));
+ok("tip: older than a day is the full date only", P.stampDetail(NOW - 2 * 86400000, NOW, "") === fullOf(NOW - 2 * 86400000));
+const sr = (role, ts, extra) => Object.assign({ role, content: "x", timestamp: ts }, extra || {});
+ok("stamps: under each message you sent and the last reply row of each turn",
+  J(P.messageStamps([sr("user", 1), sr("assistant", 2), sr("tool", 3), sr("assistant", 4), sr("user", 5), sr("assistant", 6)], false)) ===
+  J(["user", null, null, "reply", "user", "reply"]));
+ok("stamps: the newest turn's reply waits while it runs; earlier turns keep theirs",
+  J(P.messageStamps([sr("user", 1), sr("assistant", 2), sr("user", 3), sr("assistant", 4)], true)) === J(["user", "reply", "user", null]));
+ok("stamps: a reply with tool rows after it still ends the turn; notes and guidance don't open one",
+  J(P.messageStamps([sr("user", 1), sr("assistant", 2), sr("user", 3, { display_kind: "steer" }), sr("assistant", 4), sr("tool", 5)], false)) ===
+  J(["user", null, null, "reply", null]));
+ok("stamps: a page that starts mid-turn stamps that turn's reply",
+  J(P.messageStamps([sr("assistant", 1), sr("assistant", 2), sr("user", 3)], false)) === J([null, "reply", "user"]));
+ok("stamps: rows with no time are skipped, the last timed reply gets it",
+  J(P.messageStamps([sr("user", null), sr("assistant", 2), sr("assistant", undefined)], false)) === J([null, "reply", null]) &&
+  J(P.messageStamps(null, false)) === "[]" && J(P.messageStamps([null, "x"], false)) === J([null, null]));
 process.stdout.write(JSON.stringify(out));
 """
 
@@ -652,7 +695,7 @@ check("fold: rule and button text from PhoneParts.clampState, aria-expanded set"
       "PhoneParts.clampState(size.full, size.line, PhoneParts.CLAMP_LINES, CLAMP.open.has(key))" in app and
       "button.textContent = look.button" in app and 'button.setAttribute("aria-expanded"' in app)
 check("fold: opened state kept until Show less or another chat; live -> saved carries over",
-      "historyNodes.clear();\n  resetClamps();" in app and 'CLAMP.open.add("m" + saved.id)' in app)
+      "historyNodes.clear();\n  stampNodes.clear();\n  resetClamps();" in app and 'CLAMP.open.add("m" + saved.id)' in app)
 check("fold: a search hit inside a folded message opens it",
       "CLAMP.query = searching() ? SEARCH.q.toLowerCase() : \"\"" in app and
       "words.textContent.toLowerCase().includes(CLAMP.query)" in app)
@@ -678,7 +721,8 @@ check("copy: clipboard write starts inside the tap (no await first), with a fall
 check("copy: styled, scratch box off screen", ".tap-copy {" in css and ".copy-scratch {" in css and "left: -9999px" in css)
 render_src = app.split("function renderTranscript(opts) {")[1].split("\n}\n")[0] if "function renderTranscript(opts) {" in app else ""
 check("dividers: rule from PhoneParts.dayBreaks, label worked out at paint time",
-      "PhoneParts.dayBreaks(shownRows.map((r) => r.message))" in render_src and "const nowMs = Date.now();" in render_src and
+      "const rows = shownRows.map((r) => r.message);" in render_src and "PhoneParts.dayBreaks(rows)" in render_src and
+      "const nowMs = Date.now();" in render_src and
       "PhoneParts.dividerLabel(key, nowMs)" in app)
 check("dividers: spliced in before the day's first message, Load earlier first and #live last",
       "shownRows.push({ message, at: wanted.length });" in render_src and
@@ -715,6 +759,26 @@ check("pin: re-measured on scroll (one frame at a time), after each render and o
       "DATE_PIN.frame = requestAnimationFrame(updateDatePin);" in app and
       render_src.rstrip().endswith("updateDatePin();") and
       '$("transcript").textContent = "";\n  updateDatePin();' in app)
+stamp_src = app.split("function messageStamp(key, ms, kind, nowMs) {")[1].split("\n}\n")[0] if "function messageStamp(" in app else ""
+check("times: rule from PhoneParts.messageStamps, spliced after the row, before its day line",
+      "const stamps = PhoneParts.messageStamps(rows, turnOpen());" in render_src and
+      render_src.index("wanted.splice(shownRows[i].at + 1, 0, messageStamp(") < render_src.index("if (breaks[i]) wanted.splice(shownRows[i].at, 0, dayDivider("))
+check("times: one cached button per row, text from stampLabel/stampDetail with the clock setting, tap swaps in the full date",
+      "stampNodes.get(key)" in stamp_src and 'createElement("button")' in stamp_src and 'node.type = "button"' in stamp_src and
+      "node._full = !node._full" in stamp_src and "PhoneParts.stampLabel(node._ms, nowMs, CLOCK.setting)" in app and
+      "PhoneParts.stampDetail(node._ms, nowMs, CLOCK.setting)" in app and "stampNodes.clear();" in app)
+check("times: the newest reply waits while this page's run or another window's turn is open",
+      "return Boolean(OTHER.busy) || Boolean(run && historyHasUser(run));" in app)
+check("times: a just-sent message shows its time until its row is saved",
+      'if (mine && run.startedAt) nodes.push(messageStamp("run" + run.startedAt, run.startedAt, "user", Date.now()));' in app)
+check("times: clock setting from /phone-api/profiles, applied to every clock on the page",
+      'CLOCK.setting = data.clock === "24h" || data.clock === "12h" ? data.clock : "";' in app and
+      len(re.findall(r"toLocaleTimeString\(", app)) == app.count("PhoneParts.clockOptions(CLOCK.setting)"))
+msg_time_css = css.split(".msg-time {")[1].split("}")[0] if ".msg-time {" in css else ""
+check("times: desktop look (11px, tabular, muted), right under the message, no button chrome",
+      "font-size: 11px" in msg_time_css and "font-variant-numeric: tabular-nums" in msg_time_css and
+      "color: var(--muted-fg)" in msg_time_css and "margin: -14px 0 10px auto" in msg_time_css and
+      "border: 0" in msg_time_css and "background: none" in msg_time_css)
 # Classic scripts share one global scope: a second top-level function with the
 # same name silently replaces the first everywhere (the clockTime bug: the
 # Status screen lost the seconds on its "Refreshed" time).

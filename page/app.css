@@ -261,6 +261,15 @@ input[type="password"]:focus, input.code:focus, textarea:focus { border-color: v
 .clamp-toggle[hidden] { display: none; }
 .clamp-toggle:not(:last-child) { margin-bottom: 0; }
 .bubble .clamp-toggle[hidden] + .pics, .bubble .clamp-toggle[hidden] + .files { margin-top: 8px; }
+/* Message times: the desktop's hover time (11px, tabular, faint), shown
+   always on the phone, right-aligned just under the message it belongs to.
+   The negative top margin takes back most of the message's 16px gap. */
+.msg-time {
+  display: block; width: fit-content; margin: -14px 0 10px auto; padding: 2px 2px;
+  border: 0; background: none; color: var(--muted-fg); opacity: 0.85;
+  font-size: 11px; line-height: 20px; font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right;
+  cursor: default; user-select: none; -webkit-user-select: none;
+}
 .assistant { white-space: normal; overflow-wrap: anywhere; font-size: 14px; line-height: 1.55; }
 .assistant p { margin: 0 0 8px; }
 .intro {

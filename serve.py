@@ -1119,7 +1119,8 @@ def serve_profiles(client, lines):
     status = status_settings()
     body = {"profiles": served_profiles(), "status": status is not None,
             # Status is the screen the app opens on, unless "start": false.
-            "status_start": status is not None and status.get("start") is not False}
+            "status_start": status is not None and status.get("start") is not False,
+            "clock": clock_setting()}
     send_response(client, 200, "OK", json.dumps(body), "application/json")
 
 
@@ -1684,6 +1685,13 @@ STATUS_STALE = 5 * 60
 STATUS_CARDS_MAX = 12
 STATUS_STATES = ("ok", "warn", "bad", "info")
 STATUS_LINK = re.compile(r"^#(?:s=[A-Za-z0-9_.:-]{1,128}(?:&p=[A-Za-z0-9_-]{1,64})?|cron(?:=[A-Za-z0-9_-]{1,64}(?:&p=[A-Za-z0-9_-]{1,64})?)?|bots)$")
+
+
+def clock_setting():
+    """config.json "clock": "24h" or "12h" for the page's times, else "" (the
+    phone's own default). Read on each request."""
+    value = load_settings().get("clock")
+    return value if value in ("24h", "12h") else ""
 
 
 def status_settings():

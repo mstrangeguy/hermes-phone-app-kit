@@ -868,6 +868,7 @@ async function loadProfiles() {
       if (Array.isArray(data.profiles) && data.profiles.length) PROFILES.list = data.profiles;
       STATUS.enabled = data.status === true;
       STATUS.start = data.status_start === true;
+      CLOCK.setting = data.clock === "24h" || data.clock === "12h" ? data.clock : "";
       $("mode-status").hidden = !STATUS.enabled;
     }
   } catch (e) {
@@ -1566,7 +1567,7 @@ async function refreshStatus() {
 // format, and in a classic script the later function of a name silently
 // replaces the earlier one everywhere.
 function refreshClock(ms) {
-  return new Date(ms).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
+  return new Date(ms).toLocaleTimeString([], Object.assign({ hour: "numeric", minute: "2-digit", second: "2-digit" }, PhoneParts.clockOptions(CLOCK.setting)));
 }
 
 function statusCard(card) {
@@ -2047,7 +2048,7 @@ function clockTime(ms) {
   if (!ms) return "";
   const d = new Date(ms);
   const sameDay = dayStart(ms) === dayStart(Date.now());
-  const time = d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  const time = d.toLocaleTimeString(undefined, Object.assign({ hour: "numeric", minute: "2-digit" }, PhoneParts.clockOptions(CLOCK.setting)));
   return sameDay ? time : d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" }) + ", " + time;
 }
 
@@ -2056,7 +2057,7 @@ function clockTime(ms) {
 const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 function hm(h, m) {
   const d = new Date(2000, 0, 1, h, m);
-  return d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  return d.toLocaleTimeString(undefined, Object.assign({ hour: "numeric", minute: "2-digit" }, PhoneParts.clockOptions(CLOCK.setting)));
 }
 function plainSchedule(text) {
   const parts = String(text || "").trim().split(/\s+/);
@@ -2495,6 +2496,7 @@ async function openSession(id, title, push, profile) {
   paintSendState();
   markRead(id);
   historyNodes.clear();
+  stampNodes.clear();
   resetClamps();
   if (state.tail && state.tail.sessionId !== id) state.tail = null;
   notice("");
@@ -2812,6 +2814,47 @@ function dayDivider(key, nowMs) {
   return hit.node;
 }
 
+// --- Message times --------------------------------------------------------------
+// The desktop shows when a message landed on hover ("15:27", "Yesterday,
+// 15:27", "Nov 6, 15:27"). A phone has no hover, so a small line sits under
+// each message you sent and under the end of each reply; a tap swaps in the
+// desktop's tip ("5 min ago · Sunday, November 8, 2026 at 15:27"). Hour style
+// comes from config.json "clock" (CLOCK.setting). One node per row, kept like
+// the day lines, and the text worked out at every paint.
+const CLOCK = { setting: "" };
+const stampNodes = new Map();
+
+function messageStamp(key, ms, kind, nowMs) {
+  let node = stampNodes.get(key);
+  if (!node) {
+    // A button, so the transcript's double-tap (reactions) leaves its taps alone.
+    node = document.createElement("button");
+    node.type = "button";
+    node.addEventListener("click", () => {
+      node._full = !node._full;
+      paintStamp(node, Date.now());
+    });
+    stampNodes.set(key, node);
+  }
+  node.className = "msg-time " + kind;
+  node._ms = ms;
+  paintStamp(node, nowMs);
+  return node;
+}
+
+function paintStamp(node, nowMs) {
+  const text = node._full ? PhoneParts.stampDetail(node._ms, nowMs, CLOCK.setting)
+    : PhoneParts.stampLabel(node._ms, nowMs, CLOCK.setting);
+  if (node.textContent !== text) node.textContent = text;
+  node.setAttribute("aria-label", PhoneParts.stampDetail(node._ms, nowMs, CLOCK.setting));
+}
+
+// The newest turn is still running here (its message is saved) or in another window.
+function turnOpen() {
+  const run = liveRun(state.sessionId);
+  return Boolean(OTHER.busy) || Boolean(run && historyHasUser(run));
+}
+
 function paintDayCap(cap, label) {
   cap.textContent = "";
   if (label.prefix) {
@@ -2913,10 +2956,18 @@ function renderTranscript(opts) {
   }
   flush();
   // Date dividers (S56): one above the first message of each local day.
-  // Spliced from the end so earlier positions stay valid.
-  const breaks = PhoneParts.dayBreaks(shownRows.map((r) => r.message));
+  // Message times: one under each message you sent and each finished
+  // reply. Spliced from the end, the time before the divider, so earlier
+  // positions stay valid.
+  const rows = shownRows.map((r) => r.message);
+  const breaks = PhoneParts.dayBreaks(rows);
+  const stamps = PhoneParts.messageStamps(rows, turnOpen());
   const nowMs = Date.now();
   for (let i = shownRows.length - 1; i >= 0; i--) {
+    const message = shownRows[i].message;
+    if (stamps[i] && message.id != null) {
+      wanted.splice(shownRows[i].at + 1, 0, messageStamp("m" + message.id, PhoneParts.messageMs(message), stamps[i], nowMs));
+    }
     if (breaks[i]) wanted.splice(shownRows[i].at, 0, dayDivider(breaks[i], nowMs));
   }
   if (!shown && !currentRun()) {
@@ -3927,7 +3978,10 @@ function renderLive(rebuilding) {
   const run = currentRun();
   const nodes = [];
   if (run) {
-    nodes.push(userNode(run));
+    const mine = userNode(run);
+    nodes.push(mine);
+    // A message just sent shows its time too, until its saved row takes over.
+    if (mine && run.startedAt) nodes.push(messageStamp("run" + run.startedAt, run.startedAt, "user", Date.now()));
     for (const block of run.blocks) nodes.push(liveNode(block));
     nodes.push(statusNode(run));
   } else {

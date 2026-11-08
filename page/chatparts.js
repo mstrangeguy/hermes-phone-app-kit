@@ -480,8 +480,83 @@
     return { day: String(list[index].day || ""), shift };
   }
 
+  // Message times, after the desktop's thread/message-hover-time.tsx and
+  // timestamp.ts. The desktop shows them on hover; a phone has no hover, so
+  // the page shows them under every message you sent and under the end of
+  // each reply. `setting` is config.json "clock": "24h", "12h", or "" for the
+  // phone's own default.
+  function clockOptions(setting) {
+    if (setting === "24h") return { hourCycle: "h23" };
+    if (setting === "12h") return { hour12: true };
+    return {};
+  }
+
+  // Desktop formatMessageTimestamp: "15:27" today, "Yesterday, 15:27", older
+  // (or a clock ahead of the Mac's) "Nov 6, 15:27". Days are compared as
+  // local midnights, so a DST change can't make today read as yesterday.
+  function stampLabel(ms, nowMs, setting) {
+    if (typeof ms !== "number" || !isFinite(ms) || ms <= 0) return "";
+    const date = new Date(ms);
+    const now = new Date(typeof nowMs === "number" && isFinite(nowMs) ? nowMs : Date.now());
+    const midnight = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+    const days = Math.round((midnight(now) - midnight(date)) / 86400000);
+    const cycle = clockOptions(setting);
+    const clock = date.toLocaleTimeString(undefined, Object.assign({ hour: "numeric", minute: "2-digit" }, cycle));
+    if (days === 0) return clock;
+    if (days === 1) return "Yesterday, " + clock;
+    return date.toLocaleString(undefined, Object.assign({ month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }, cycle));
+  }
+
+  // The desktop's hover tip: the full date, after "5 min ago · " within a day.
+  // Shown on the phone when the time is tapped.
+  function stampDetail(ms, nowMs, setting) {
+    if (typeof ms !== "number" || !isFinite(ms) || ms <= 0) return "";
+    const now = typeof nowMs === "number" && isFinite(nowMs) ? nowMs : Date.now();
+    const full = new Date(ms).toLocaleString(undefined, Object.assign({ dateStyle: "full", timeStyle: "short" }, clockOptions(setting)));
+    if (now - ms >= 86400000) return full;
+    // The desktop's relativeTime: coarsest unit, Intl short style ("5 min ago").
+    const diff = ms - now;
+    const abs = Math.abs(diff);
+    const sign = diff < 0 ? -1 : 1;
+    const [n, unit] = abs < 60000 ? [Math.round(abs / 1000), "second"] : abs < 3600000 ? [Math.round(abs / 60000), "minute"]
+      : abs < 86400000 ? [Math.round(abs / 3600000), "hour"] : [Math.round(abs / 86400000), "day"];
+    let ago = "";
+    try {
+      ago = new Intl.RelativeTimeFormat(undefined, { numeric: "auto", style: "short" }).format(sign * n, unit);
+    } catch (e) {
+      ago = "";
+    }
+    return ago ? ago + " \u00b7 " + full : full;
+  }
+
+  // For the shown rows (oldest first): "user" under a message you sent,
+  // "reply" under the last reply row of each turn (the desktop counts a reply
+  // from when it finished), else null. Rows with no time get nothing. While
+  // `open` is true the newest turn is still running, so its reply gets none yet.
+  function messageStamps(rows, open) {
+    const list = Array.isArray(rows) ? rows : [];
+    const out = list.map(() => null);
+    let last = -1;
+    const close = (running) => {
+      if (last >= 0 && !running) out[last] = "reply";
+      last = -1;
+    };
+    list.forEach((row, i) => {
+      if (!row || typeof row !== "object") return;
+      if (row.role === "user" && !row.display_kind) {
+        close(false);
+        if (messageMs(row) !== null) out[i] = "user";
+      } else if (row.role === "assistant" && messageMs(row) !== null) {
+        last = i;
+      }
+    });
+    close(Boolean(open));
+    return out;
+  }
+
   root.PhoneParts = {
     messageMs, dayKey, dividerLabel, dayBreaks, resolveDatePin,
+    clockOptions, stampLabel, stampDetail, messageStamps,
     CLAMP_LINES, clampState, copyText,
     TODO_TOOLS, isTodoTool, parseTodos, todoTree, todoProgress, todoWeight, todoTone, runOutcome, freshlyDone,
     latestTodos, planVisible, planState, waitedOnId, stepName, segLook, rowHalt,

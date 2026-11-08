@@ -100,6 +100,7 @@ Written by the installer. Edit it by hand to change alerts; the alerts block is 
 |---|---|
 | `app_name` | Name shown in the app, on the Home Screen icon and in alerts, e.g. `Hermes Work`. Default `Hermes`. Up to 30 characters. Needs a proxy restart, then delete and re-add the Home Screen icon. |
 | `accent_color` | Accent color for buttons, highlights and the app name in the list header, as `#rrggbb`, e.g. `#e5a50a`. Default blue, with a white name. Needs a proxy restart. |
+| `clock` | `"24h"` or `"12h"` for every time the app shows (message times, cron, refresh). Unset follows the phone's language default. Use it to match a Desktop set to a 24-hour clock. Read on each app open. |
 | `port` | Local proxy port. Default 8643. Needs a proxy restart. |
 | `upstream_port` | Hermes API port. Default 8642. |
 | `hermes_home` | Hermes home. Default `~/.hermes`. |
