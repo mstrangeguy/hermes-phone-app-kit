@@ -898,13 +898,21 @@ button.bucket.group::after { order: 3; }
 /* A step that hit an error while the job went on: red on its own (S53). */
 .plan-seg.completed.error { --seg: #f85149; }
 .plan.tone-failed .plan-tag, .plan.tone-stopped .plan-tag { color: #f85149; }
-.plan.tone-waiting { border-color: color-mix(in srgb, #e3c03a 60%, var(--border)); }
-.plan.tone-waiting .plan-ico, .plan.tone-waiting .plan-count { color: #e3c03a; }
-/* Waiting: only the step waited on is yellow; done steps keep the accent colour. */
-.plan-seg.halt-waiting { background: color-mix(in srgb, #e3c03a 25%, transparent); box-shadow: inset 0 0 0 1px #e3c03a; }
-.plan.tone-waiting .plan-tag { color: #e3c03a; }
+/* S68, after the desktop: amber-500 "Waiting on you" (the sidebar dot's colour)
+   only for a flagged step or a prompt card; slate-400 "Paused" for a reply that
+   ended with steps open. Only the held step is outlined; done steps keep the
+   accent colour. */
+.plan.tone-waiting { border-color: color-mix(in srgb, #f59e0b 60%, var(--border)); }
+.plan.tone-waiting .plan-ico, .plan.tone-waiting .plan-count { color: #f59e0b; }
+.plan-seg.halt-waiting { background: color-mix(in srgb, #f59e0b 25%, transparent); box-shadow: inset 0 0 0 1px #f59e0b; }
+.plan.tone-waiting .plan-tag { color: #f59e0b; }
+.plan.tone-paused { border-color: color-mix(in srgb, #94a3b8 45%, var(--border)); }
+.plan.tone-paused .plan-ico, .plan.tone-paused .plan-count { color: #94a3b8; }
+.plan-seg.halt-paused { background: color-mix(in srgb, #94a3b8 25%, transparent); box-shadow: inset 0 0 0 1px #94a3b8; }
+.plan.tone-paused .plan-tag { color: #94a3b8; }
 .todo.halt-failed .todo-mark, .todo.halt-stopped .todo-mark { color: #f85149; animation: none; }
-.todo.halt-waiting .todo-mark { color: #e3c03a; animation: none; }
+.todo.halt-waiting .todo-mark { color: #f59e0b; animation: none; }
+.todo.halt-paused .todo-mark { color: #94a3b8; animation: none; }
 .plan-body { max-height: 38vh; overflow-y: auto; overscroll-behavior-y: contain; padding: 6px 10px 8px; }
 .todo-list { list-style: none; margin: 0; padding: 0; }
 .todo { display: flex; gap: 8px; align-items: baseline; padding: 3px 0; font-size: 13.5px; }

@@ -103,23 +103,58 @@
     return { done, total: counted.length, open: counted.length - done, current, percent };
   }
 
-  // The card's colour: "done" (green), "failed"/"stopped" (red, from how the
-  // reply ended), "waiting" (yellow: the step waits on you, or the reply ended
-  // with steps still open, which almost always means a question to you), else
-  // "running" while a reply works. "idle" is left only for an empty list.
-  function todoTone(todos, outcome, working) {
+  // The card's colour, after the desktop's task bar (sync row S68):
+  // "done" (green), "failed"/"stopped" (red, from how the reply ended),
+  // "waiting" (amber "Waiting on you": a step is flagged waiting, or a prompt
+  // card - approval or question - blocks this chat: `blocking`), "running"
+  // while a reply works, "paused" (slate) when the reply ended with steps
+  // still open and nothing waits on you. "idle" only for an empty list.
+  // The desktop's violet "In background" has no signal on the phone.
+  function todoTone(todos, outcome, working, blocking) {
     const prog = todoProgress(todos);
     if (prog.total > 0 && prog.open === 0) return "done";
     if (outcome === "failed" || outcome === "stopped") return outcome;
-    if (prog.current && prog.current.waiting) return "waiting";
+    if (prog.open > 0 && (blocking || (prog.current && prog.current.waiting))) return "waiting";
     if (working) return "running";
-    return prog.open > 0 ? "waiting" : "idle";
+    return prog.open > 0 ? "paused" : "idle";
   }
 
-  // The step a "waiting" list waits on: the in-progress one, or the first
-  // pending one when the reply ended with none in progress. Null otherwise.
+  // Tones that mark one step (the in-progress one, else the first pending).
+  const HELD_TONES = ["waiting", "paused"];
+
+  // A kept list from an earlier turn: its `waiting` flags are stale once you
+  // have sent a message since, so it comes back Paused, not Waiting (S68).
+  function dropWaiting(todos) {
+    return (Array.isArray(todos) ? todos : []).map((t) => {
+      if (!t || !t.waiting) return t;
+      const copy = Object.assign({}, t);
+      delete copy.waiting;
+      return copy;
+    });
+  }
+
+  // How long a held list has been held, the desktop's formatTodoAge:
+  // "<1m", "6m", "2h", "3d".
+  function heldAge(ms) {
+    const minutes = Math.floor(Math.max(0, Number(ms) || 0) / 60000);
+    if (minutes < 1) return "<1m";
+    if (minutes < 60) return minutes + "m";
+    const hours = Math.floor(minutes / 60);
+    return hours < 24 ? hours + "h" : Math.floor(hours / 24) + "d";
+  }
+
+  // The tag beside the count: "Waiting on you", "Paused", "Stopped",
+  // "Failed", with the age after waiting / paused when one is known.
+  function toneTag(tone, ageText) {
+    const tag = { failed: "Failed", stopped: "Stopped", waiting: "Waiting on you", paused: "Paused" }[tone] || "";
+    if (!tag) return "";
+    return ageText && HELD_TONES.indexOf(tone) >= 0 ? tag + " \u00b7 " + ageText : tag;
+  }
+
+  // The step a held list ("waiting" or "paused") is held on: the in-progress
+  // one, or the first pending one when none is in progress. Null otherwise.
   function waitedOnId(todos, tone) {
-    if (tone !== "waiting") return null;
+    if (HELD_TONES.indexOf(tone) < 0) return null;
     const list = Array.isArray(todos) ? todos : [];
     const step = list.find((t) => t.status === "in_progress") || list.find((t) => t.status === "pending");
     return step ? step.id : null;
@@ -134,7 +169,7 @@
     if (!list.some((t) => t.status === "pending" || t.status === "in_progress")) return null;
     const running = list.find((t) => t.status === "in_progress");
     if (running) return running.content || null;
-    if (tone === "waiting" || tone === "stopped" || tone === "failed") {
+    if (tone === "waiting" || tone === "paused" || tone === "stopped" || tone === "failed") {
       const next = list.find((t) => t.status === "pending");
       return next ? next.content || null : null;
     }
@@ -151,7 +186,7 @@
     const listRed = tone === "failed" || tone === "stopped";
     const error = Boolean(todo && todo.error) && todo.status !== "cancelled" && !listRed;
     let halt = null;
-    if (todo && waitingId != null && todo.id === waitingId) halt = "waiting";
+    if (todo && waitingId != null && todo.id === waitingId) halt = HELD_TONES.indexOf(tone) >= 0 ? tone : "waiting";
     else if (todo && todo.status === "in_progress") halt = listRed ? tone : error ? "failed" : null;
     else if (todo && todo.status === "pending" && error) halt = "failed";
     return { halt, error };
@@ -163,7 +198,7 @@
   function rowHalt(todo, tone, waitingId) {
     if (!todo || todo.status === "cancelled") return null;
     if (todo.error) return "failed";
-    if (waitingId != null && todo.id === waitingId) return "waiting";
+    if (waitingId != null && todo.id === waitingId) return HELD_TONES.indexOf(tone) >= 0 ? tone : "waiting";
     if (todo.status === "in_progress" && (tone === "failed" || tone === "stopped" || tone === "waiting")) return tone;
     return null;
   }
@@ -559,6 +594,7 @@
     clockOptions, stampLabel, stampDetail, messageStamps,
     CLAMP_LINES, clampState, copyText,
     TODO_TOOLS, isTodoTool, parseTodos, todoTree, todoProgress, todoWeight, todoTone, runOutcome, freshlyDone,
+    HELD_TONES, dropWaiting, heldAge, toneTag,
     latestTodos, planVisible, planState, waitedOnId, stepName, segLook, rowHalt,
     QUICK_REACTIONS, applyReaction, mine, tapDetector, searchRows,
     gatewayRoute, coreText, gatewayProgress, gatewayStep,

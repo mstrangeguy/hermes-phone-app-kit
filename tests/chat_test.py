@@ -394,8 +394,33 @@ ok("state: hidden when dismissed", st(plan, { lastUserRowId: 9, dismissed: true 
   st(plan, { lastUserRowId: 20, working: true, planningDismissed: true }) === "hidden");
 ok("state: hidden with no list and nothing running", st({ todos: [], rowId: 0 }, {}) === "hidden" && st(null, {}) === "hidden");
 
-ok("tone: open steps at turn end are yellow", P.todoTone(job(2, 2), null, false) === "waiting" &&
-  P.todoTone(job(2, -1), null, false) === "waiting" && P.todoTone(job(8, -1), null, false) === "done");
+// S68: a reply that ended with open steps and no flag is Paused (slate), not Waiting.
+ok("tone: open steps at turn end, no flag, are paused", P.todoTone(job(2, 2), null, false) === "paused" &&
+  P.todoTone(job(2, -1), null, false) === "paused" && P.todoTone(job(8, -1), null, false) === "done");
+ok("tone: waiting only for a flagged step or a prompt card (blocking), running or not",
+  P.todoTone(wjob, null, false) === "waiting" && P.todoTone(wjob, null, true) === "waiting" &&
+  P.todoTone(job(2, 2), null, false, true) === "waiting" && P.todoTone(job(2, 2), null, true, true) === "waiting" &&
+  P.todoTone(job(2, 2), null, true, false) === "running");
+ok("tone: red and green still win over a prompt card or a flag",
+  P.todoTone(wjob, "stopped", false, true) === "stopped" && P.todoTone(job(2, 2), "failed", false, true) === "failed" &&
+  P.todoTone(job(8, -1), null, false, true) === "done");
+ok("tone: empty list is idle", P.todoTone([], null, false) === "idle" && P.todoTone([], null, false, true) === "idle");
+const wkept = P.dropWaiting(wjob);
+ok("previous list: stale waiting flags dropped, comes back paused, the input is not changed",
+  wkept.every((t) => !("waiting" in t)) && wjob[2].waiting === true && P.todoTone(wkept, null, false) === "paused" &&
+  J(P.dropWaiting(null)) === "[]");
+const lpz = (() => { const w = P.waitedOnId(job(2, 2), "paused"); return job(2, 2).map((t) => P.segLook(t, "paused", w)); })();
+ok("paused: only the held step is outlined slate, done steps unchanged", lpz[2].halt === "paused" &&
+  lpz.slice(0, 2).every((l) => l.halt === null) && lpz.slice(3).every((l) => l.halt === null) &&
+  P.waitedOnId(job(2, -1), "paused") === "s2" && P.waitedOnId(job(2, 2), "running") === null);
+ok("paused: row mark and step name", P.rowHalt(job(2, 2)[2], "paused", "s2") === "paused" &&
+  P.rowHalt(job(2, 2)[1], "paused", "s2") === null && P.stepName(job(2, -1), "paused") === job(2, -1)[2].content);
+ok("age: the desktop's formatTodoAge", [0, 59999, 60000, 59 * 60000, 3600000, 23 * 3600000, 24 * 3600000, 50 * 3600000, -5, NaN]
+  .map(P.heldAge).join() === "<1m,<1m,1m,59m,1h,23h,1d,2d,<1m,<1m");
+ok("tag: Waiting on you / Paused with age; Stopped / Failed without; running and done none",
+  P.toneTag("waiting", "12m") === "Waiting on you \u00b7 12m" && P.toneTag("paused", "2h") === "Paused \u00b7 2h" &&
+  P.toneTag("paused", "") === "Paused" && P.toneTag("stopped", "5m") === "Stopped" && P.toneTag("failed") === "Failed" &&
+  P.toneTag("running", "1m") === "" && P.toneTag("done", "") === "" && P.HELD_TONES.join() === "waiting,paused");
 ok("tone: red kept for stopped/failed at turn end", P.todoTone(job(2, 2), "stopped", false) === "stopped" &&
   P.todoTone(job(2, 2), "failed", false) === "failed");
 ok("tone: running again on the next send", P.todoTone(job(2, 2), null, true) === "running");
@@ -665,7 +690,7 @@ check("planning stripes grey, still with Reduce Motion",
 check("waiting no longer tints the done segments", ".plan.tone-waiting { --seg" not in css and ".plan-seg.halt-waiting" in css)
 check("errored done step red", ".plan-seg.completed.error { --seg: #f85149; }" in css)
 check("step name on its own line under the bar, header keeps count, tag, %",
-      "PhoneParts.stepName(PLAN.todos, tone)" in app and 'stepLine.className = "plan-step"' in app and
+      "PhoneParts.stepName(todos, tone)" in app and 'stepLine.className = "plan-step"' in app and
       "box.append(top, bar);\n  if (stepText)" in app and ".plan-step {" in css and
       "text-overflow: ellipsis" in css.split(".plan-step {")[1].split("}")[0])
 check("pin and archive use Hermes's PATCH", re.search(r'method: "PATCH",\s*body: JSON.stringify\(\{ \[flag\]: value \}\)', app))
@@ -719,6 +744,23 @@ check("copy: clipboard write starts inside the tap (no await first), with a fall
       "await" not in copy_src and "copyToClipboard(text)" in copy_src and "navigator.clipboard.writeText(text)" in app and
       'document.execCommand("copy")' in app and 'button.textContent = "Copied"' in copy_src)
 check("copy: styled, scratch box off screen", ".tap-copy {" in css and ".copy-scratch {" in css and "left: -9999px" in css)
+plan_src = app.split("function paintPlan() {")[1].split("\n}\n")[0] if "function paintPlan() {" in app else ""
+check("S68 card: blocking from prompt cards, previous list without waiting flags, age only after the reply",
+      "const blocking = planBlocking();" in plan_src and
+      'const todos = view === "previous" ? PhoneParts.dropWaiting(PLAN.todos) : PLAN.todos;' in plan_src and
+      "const since = working ? null : planHeldSince();" in plan_src and
+      "PhoneParts.todoTone(todos, outcome, working, blocking)" in plan_src and
+      "desktopApprovalsHere().length > 0" in app.split("function planBlocking() {")[1].split("\n}\n")[0])
+check("S68 card: tag text and age from PhoneParts, age ticks with the 1 s timer, tone-paused class",
+      "PhoneParts.toneTag(tone, since ? PhoneParts.heldAge(Date.now() - since) : \"\")" in plan_src and
+      "PLAN.tagNode = { node: tagNode, tone, since }" in plan_src and
+      "PhoneParts.heldAge(Date.now() - held.since)" in app.split("function tickPlanTime() {")[1].split("\n}\n")[0] and
+      '["failed", "stopped", "waiting", "paused"]' in plan_src and '"tone-paused"]) box.classList.remove(c)' in app)
+check("S68 colours: amber-500 waiting, slate-400 paused, old yellow gone, slate square row mark",
+      "#e3c03a" not in css and ".plan-seg.halt-waiting { background: color-mix(in srgb, #f59e0b 25%" in css and
+      ".plan-seg.halt-paused { background: color-mix(in srgb, #94a3b8 25%" in css and
+      ".plan.tone-paused .plan-tag { color: #94a3b8; }" in css and ".todo.halt-paused .todo-mark { color: #94a3b8;" in css and
+      '{ waiting: "\\u2016", paused: "\\u25a0" }[halted]' in app)
 render_src = app.split("function renderTranscript(opts) {")[1].split("\n}\n")[0] if "function renderTranscript(opts) {" in app else ""
 check("dividers: rule from PhoneParts.dayBreaks, label worked out at paint time",
       "const rows = shownRows.map((r) => r.message);" in render_src and "PhoneParts.dayBreaks(rows)" in render_src and

@@ -5762,8 +5762,32 @@ function planningSince(turn) {
 }
 
 function tickPlanTime() {
+  // A held tag's age ("Paused · 6m") moves on with the clock.
+  const held = PLAN.tagNode;
+  if (held && held.node.isConnected) {
+    const text = PhoneParts.toneTag(held.tone, PhoneParts.heldAge(Date.now() - held.since));
+    if (held.node.textContent !== text) held.node.textContent = text;
+  }
   if (PLAN.view !== "planning" || !PLAN.timeNode || !PLAN.timeNode.isConnected) return;
   PLAN.timeNode.textContent = clock(Date.now() - planningSince(planTurn()));
+}
+
+// S68: a prompt card (approval or question) blocks this chat, from the
+// desktop's pending list or the phone's own run.
+function planBlocking() {
+  const run = liveRun(state.sessionId);
+  return desktopApprovalsHere().length > 0 || Boolean(run && Array.isArray(run.approvals) && run.approvals.length);
+}
+
+// When the reply holding the list ended: the newest message's time (ms), or
+// null when unknown. The age in the tag counts from it.
+function planHeldSince() {
+  let newest = null;
+  for (const m of state.messages) {
+    const ms = PhoneParts.messageMs(m);
+    if (ms != null && (newest == null || ms > newest)) newest = ms;
+  }
+  return newest;
 }
 
 function lastUserRowId() {
@@ -5787,11 +5811,11 @@ function todoListNode(todos, tone) {
     const mark = document.createElement("span");
     mark.className = "todo-mark";
     mark.setAttribute("aria-hidden", "true");
-    // The step the list stopped on or that hit an error (red ✕), or the one
-    // it waits on you for (yellow ‖).
+    // The step the list stopped on or that hit an error (red ✕), the one it
+    // waits on you for (amber ‖), or the one a paused list stopped at (slate ■).
     const halted = PhoneParts.rowHalt(todo, tone, waitingId);
     if (halted) item.classList.add("halt-" + halted);
-    mark.textContent = halted ? (halted === "waiting" ? "\u2016" : "\u2715") : todoMark(todo.status);
+    mark.textContent = halted ? ({ waiting: "\u2016", paused: "\u25a0" }[halted] || "\u2715") : todoMark(todo.status);
     const text = document.createElement("span");
     text.className = "todo-text";
     text.textContent = todo.content;
@@ -5817,12 +5841,19 @@ function paintPlan() {
   PLAN.view = view;
   const visible = view !== "hidden";
   const outcome = PLAN_OUTCOME[state.sessionId] || null;
-  const sig = visible ? JSON.stringify([view, view === "planning" ? turn.key : PLAN.todos, PLAN.open, working, outcome]) : "";
+  // S68: amber "Waiting on you" only for a flagged step or a prompt card
+  // (approval or question) on this chat; a kept list from an earlier turn
+  // loses its stale waiting flags. No background signal on the phone.
+  const blocking = planBlocking();
+  const todos = view === "previous" ? PhoneParts.dropWaiting(PLAN.todos) : PLAN.todos;
+  const since = working ? null : planHeldSince();
+  const sig = visible ? JSON.stringify([view, view === "planning" ? turn.key : PLAN.todos, PLAN.open, working, outcome, blocking, since]) : "";
   if (sig === PLAN.sig && box.hidden === !visible) return;
   PLAN.sig = sig;
   box.hidden = !visible;
   box.textContent = "";
   PLAN.timeNode = null;
+  PLAN.tagNode = null;
   box.classList.toggle("planning", view === "planning");
   box.classList.toggle("previous", view === "previous");
   if (!visible) return;
@@ -5831,12 +5862,12 @@ function paintPlan() {
     return;
   }
   const previous = view === "previous";
-  const prog = PhoneParts.todoProgress(PLAN.todos);
+  const prog = PhoneParts.todoProgress(todos);
   const finished = prog.total > 0 && prog.open === 0;
-  const tone = PhoneParts.todoTone(PLAN.todos, outcome, working);
+  const tone = PhoneParts.todoTone(todos, outcome, working, blocking);
   box.classList.toggle("done", finished);
   box.classList.toggle("open", PLAN.open);
-  for (const t of ["failed", "stopped", "waiting"]) box.classList.toggle("tone-" + t, tone === t);
+  for (const t of ["failed", "stopped", "waiting", "paused"]) box.classList.toggle("tone-" + t, tone === t);
   const head = document.createElement("button");
   head.type = "button";
   head.className = "plan-head";
@@ -5859,9 +5890,10 @@ function paintPlan() {
   }
   const now = document.createElement("span");
   now.className = "plan-now";
-  const tag = { failed: "Failed", stopped: "Stopped", waiting: "Waiting on you" }[tone];
-  // Header: count, tag, %. The step's name gets its own line under the bar (S53 3c).
-  const stepText = previous ? null : PhoneParts.stepName(PLAN.todos, tone);
+  const tag = PhoneParts.toneTag(tone, "");
+  // Header: count, tag (with its age: "Paused · 2h"), %. The step's name gets
+  // its own line under the bar (S53 3c).
+  const stepText = previous ? null : PhoneParts.stepName(todos, tone);
   if (previous) {
     now.textContent = "Previous tasks " + prog.done + "/" + prog.total;
   } else if (finished) {
@@ -5869,7 +5901,8 @@ function paintPlan() {
   } else if (tag) {
     const tagNode = document.createElement("span");
     tagNode.className = "plan-tag";
-    tagNode.textContent = tag;
+    tagNode.textContent = PhoneParts.toneTag(tone, since ? PhoneParts.heldAge(Date.now() - since) : "");
+    if (since && PhoneParts.HELD_TONES.indexOf(tone) >= 0) PLAN.tagNode = { node: tagNode, tone, since };
     now.append(tagNode);
   }
   const chev = document.createElement("span");
@@ -5893,8 +5926,8 @@ function paintPlan() {
   PLAN.doneIds = PLAN.todos.filter((t) => t.status === "completed").map((t) => t.id);
   const bar = document.createElement("div");
   bar.className = "plan-bar";
-  const waitingId = PhoneParts.waitedOnId(PLAN.todos, tone);
-  for (const [todo] of PhoneParts.todoTree(PLAN.todos)) {
+  const waitingId = PhoneParts.waitedOnId(todos, tone);
+  for (const [todo] of PhoneParts.todoTree(todos)) {
     if (todo.status === "cancelled") continue;
     const seg = document.createElement("span");
     seg.className = "plan-seg " + todo.status;
@@ -5932,7 +5965,7 @@ function paintPlan() {
   if (PLAN.open) {
     const body = document.createElement("div");
     body.className = "plan-body";
-    body.append(todoListNode(PLAN.todos, tone));
+    body.append(todoListNode(todos, tone));
     box.append(body);
   }
 }
@@ -5940,7 +5973,7 @@ function paintPlan() {
 // "Planning…": a reply runs and this turn has no task list yet. One full-width
 // segment of grey moving stripes and the time so far; × hides it for this turn.
 function paintPlanning(box, turn) {
-  for (const c of ["done", "open", "tone-failed", "tone-stopped", "tone-waiting"]) box.classList.remove(c);
+  for (const c of ["done", "open", "tone-failed", "tone-stopped", "tone-waiting", "tone-paused"]) box.classList.remove(c);
   if (!PLAN.planningSeen || PLAN.planningSeen.key !== turn.key) PLAN.planningSeen = { key: turn.key, at: Date.now() };
   const head = document.createElement("div");
   head.className = "plan-head";
