@@ -636,6 +636,42 @@ ok("stamps: a page that starts mid-turn stamps that turn's reply",
 ok("stamps: rows with no time are skipped, the last timed reply gets it",
   J(P.messageStamps([sr("user", null), sr("assistant", 2), sr("assistant", undefined)], false)) === J([null, "reply", null]) &&
   J(P.messageStamps(null, false)) === "[]" && J(P.messageStamps([null, "x"], false)) === J([null, null]));
+// --- v0.23+ run prompts (pending_controls) and the answer body -------------------
+const v23 = { status: "waiting_for_approval", pending_controls: [
+  { kind: "approval", prompt_id: "p1", execution_generation: 3, command: "rm -rf x", description: "delete x",
+    choices: ["once", "deny", "session", "always"] },
+  { kind: "clarify", prompt_id: "c1", execution_generation: 3, question: "Which one?", choices: ["a", "b"], multi_select: false },
+  { kind: "secret", prompt_id: "s1" }, "junk"] };
+const rc = P.runControls(v23);
+ok("controls: v0.23 approval read from pending_controls", rc.known && rc.approvals.length === 1 &&
+  rc.approvals[0].request_id === "p1" && rc.approvals[0].generation === 3 && rc.approvals[0].command === "rm -rf x" &&
+  J(rc.approvals[0].choices) === J(["once", "deny", "session", "always"]));
+ok("controls: v0.23 clarify read as a question", rc.questions.length === 1 && rc.questions[0].request_id === "c1" &&
+  rc.questions[0].generation === 3 && rc.questions[0].questions[0].question === "Which one?" &&
+  rc.questions[0].questions[0].qid === "c1" && J(rc.questions[0].questions[0].choices) === J(["a", "b"]));
+ok("controls: other kinds and junk ignored", rc.approvals.length + rc.questions.length === 2);
+ok("controls: empty pending_controls is known and empty",
+  J(P.runControls({ status: "running", pending_controls: [] })) === J({ approvals: [], questions: [], known: true }));
+const old = P.runControls({ status: "waiting_for_approval", approval: { request_id: "r9", command: "ls", choices: ["once", "deny"] } });
+ok("controls: older Hermes approval field still read", old.known && old.approvals.length === 1 &&
+  old.approvals[0].request_id === "r9" && old.approvals[0].generation === null);
+ok("controls: older Hermes, not waiting, says nothing", P.runControls({ status: "running" }).known === false &&
+  P.runControls(null).known === false);
+ok("controls: stream event shape (event + prompt fields) read the same",
+  P.controlApproval({ event: "approval.request", run_id: "r", kind: "approval", prompt_id: "p2", execution_generation: 0 }).generation === 0);
+ok("controls: a generation that is not an integer is dropped",
+  P.controlApproval({ prompt_id: "p", execution_generation: "3" }).generation === null);
+ok("answer: v0.23 approval body is exactly request_id, execution_generation, choice",
+  J(P.runAnswerBody({ request_id: "p1", generation: 3 }, "choice", "once")) ===
+  J({ request_id: "p1", execution_generation: 3, choice: "once" }));
+ok("answer: v0.23 clarify body uses answer",
+  J(P.runAnswerBody({ request_id: "c1", generation: 0 }, "answer", "a")) === J({ request_id: "c1", execution_generation: 0, answer: "a" }));
+ok("answer: older Hermes body keeps choice + request_id",
+  J(P.runAnswerBody({ request_id: "r9", generation: null }, "choice", "deny")) === J({ choice: "deny", request_id: "r9" }) &&
+  J(P.runAnswerBody({ request_id: "" }, "choice", "deny")) === J({ choice: "deny" }));
+ok("answer: multi-select sent as a JSON array of labels",
+  P.clarifyAnswerText({ multi_select: true }, ["a", "other text"]) === J(["a", "other text"]) &&
+  P.clarifyAnswerText({ multi_select: false }, "b") === "b" && P.clarifyAnswerText({}, null) === "");
 process.stdout.write(JSON.stringify(out));
 """
 
@@ -836,6 +872,18 @@ check("refresh times keep their seconds (refreshClock), cron keeps clockTime",
       '"Refreshed " + refreshClock(STATUS.refreshedAt)' in app and '"Updated " + refreshClock(Date.now())' in app)
 check("new endpoints are local, not forwarded",
       all(p in serve.LOCAL_API for p in (serve.REACTIONS_PATH, serve.REACTIONS_UNSEEN_PATH, serve.SEARCH_PATH)))
+
+check("v0.23 run prompts: poll and resume go through syncControls",
+      app.count("syncControls(run, status);") == 2 and "status.approval) addApproval" not in app)
+check("v0.23 run prompts: stream events for clarify and settled prompts handled",
+      all(('name === "%s"' % e) in app for e in ("clarify.request", "approval.settled", "clarify.settled")))
+check("v0.23 run prompts: approval answer built by runAnswerBody, stale prompts dropped",
+      'PhoneParts.runAnswerBody(approval, "choice", choice)' in app and '"stale_generation"' in app)
+check("v0.23 run prompts: questions answered at /v1/runs/<id>/clarify, shown with the question cards",
+      '"/clarify"' in app and "if (item.runId) return answerRunQuestion(item, button);" in app and
+      "paintQuestions(questionsHere())" in app)
+check("v0.23 run prompts: a waiting question lights the dot and the phase line",
+      '(run.questions && run.questions.length) ? "approval"' in app and '"Waiting for your answer"' in app)
 
 passed = sum(results)
 print("%d/%d passed" % (passed, len(results)))

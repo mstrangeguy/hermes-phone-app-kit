@@ -415,6 +415,32 @@ status, _, _ = req("POST", "/v1/runs/%s/approval" % RUN, {"choice": "once", "req
 sent = json.loads(seen[-1]["body"]) if seen else {}
 check("run Allow once with Face ID forwarded, signature not passed on",
       status == 200 and sent == {"choice": "once", "request_id": RID}, sent)
+# Hermes v0.23+: the answer must be exactly {request_id, execution_generation, choice}.
+seen.clear()
+status, _, _ = req("POST", "/v1/runs/%s/approval" % RUN, {"choice": "deny", "request_id": RID,
+                                                          "execution_generation": 4}, cookie=cookie)
+sent = json.loads(seen[-1]["body"]) if seen else {}
+check("v0.23 run Deny forwarded with execution_generation, nothing else",
+      status == 200 and sent == {"request_id": RID, "execution_generation": 4, "choice": "deny"}, str(sent))
+status, opts, _ = req("POST", "/phone-api/auth/approve/options", {"kind": "run", "run_id": RUN,
+                                                                  "request_id": RID}, cookie=cookie)
+status, _, _ = req("POST", "/v1/runs/%s/approval" % RUN, {"choice": "once", "request_id": RID, "execution_generation": 0,
+                                                          "assertion": phone.get(opts)}, cookie=cookie)
+sent = json.loads(seen[-1]["body"]) if seen else {}
+check("v0.23 run Allow once with Face ID: generation kept, signature not passed on",
+      status == 200 and sent == {"request_id": RID, "execution_generation": 0, "choice": "once"}, str(sent))
+status, _, _ = req("POST", "/v1/runs/%s/approval" % RUN, {"choice": "deny", "request_id": RID,
+                                                          "execution_generation": "4"}, cookie=cookie)
+sent = json.loads(seen[-1]["body"]) if seen else {}
+check("a generation that is not an integer is not forwarded", sent == {"choice": "deny", "request_id": RID}, str(sent))
+seen.clear()
+answer = {"request_id": "clar1", "execution_generation": 4, "answer": "b"}
+status, _, _ = req("POST", "/v1/runs/%s/clarify" % RUN, answer, cookie=cookie)
+check("v0.23 run question answer forwarded unchanged with the profile key",
+      status == 200 and seen and seen[-1]["path"] == "/v1/runs/%s/clarify" % RUN and
+      json.loads(seen[-1]["body"]) == answer and seen[-1]["auth"] == "Bearer " + KEY)
+status, _, _ = req("POST", "/v1/runs/%s/clarify" % RUN, answer)
+check("run question answer needs the unlock", status == 401)
 status, _, _ = req("POST", "/v1/runs/%s/approval" % RUN, {"choice": "deny"}, bearer=KEY)
 check("run approval with API key only is locked", status == 401)
 

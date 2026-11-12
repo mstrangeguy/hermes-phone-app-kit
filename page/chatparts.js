@@ -589,7 +589,95 @@
     return out;
   }
 
+  // A phone run's open prompts, from a run status or one stream event. Hermes
+  // v0.23+ reports them as `pending_controls` (kind "approval" or "clarify",
+  // `prompt_id`, `execution_generation`); older Hermes as one `approval` on a
+  // "waiting_for_approval" status. Returns {approvals, questions, known}:
+  // `known` is false when the status says nothing either way (an old status
+  // that is not waiting), so the caller keeps what it has from the stream.
+  function controlApproval(c) {
+    if (!isRecord(c)) return null;
+    const id = String(c.prompt_id || c.request_id || "");
+    const gen = Number.isInteger(c.execution_generation) ? c.execution_generation : null;
+    return {
+      request_id: id,
+      generation: gen,
+      command: String(c.command || ""),
+      description: String(c.description || ""),
+      choices: Array.isArray(c.choices) && c.choices.length ? c.choices.map(String) : ["once", "deny"],
+      smart_denied: Boolean(c.smart_denied)
+    };
+  }
+
+  function controlQuestion(c) {
+    if (!isRecord(c)) return null;
+    const id = String(c.prompt_id || c.request_id || "");
+    if (!id) return null;
+    const gen = Number.isInteger(c.execution_generation) ? c.execution_generation : null;
+    return {
+      kind: "clarify",
+      request_id: id,
+      generation: gen,
+      questions: [{
+        qid: id,
+        question: String(c.question || ""),
+        choices: Array.isArray(c.choices) ? c.choices.map(String) : [],
+        multi_select: Boolean(c.multi_select)
+      }]
+    };
+  }
+
+  function runControls(status) {
+    const out = { approvals: [], questions: [], known: false };
+    if (!isRecord(status)) return out;
+    if (Array.isArray(status.pending_controls)) {
+      out.known = true;
+      for (const c of status.pending_controls) {
+        if (!isRecord(c)) continue;
+        if (c.kind === "clarify") {
+          const q = controlQuestion(c);
+          if (q) out.questions.push(q);
+        } else if (c.kind === "approval") {
+          const a = controlApproval(c);
+          if (a) out.approvals.push(a);
+        }
+      }
+      return out;
+    }
+    if (status.status === "waiting_for_approval") {
+      out.known = true;
+      const a = controlApproval(status.approval);
+      if (a) out.approvals.push(a);
+    }
+    return out;
+  }
+
+  // The body Hermes takes for an answer. v0.23+ (a prompt with a generation)
+  // needs exactly {request_id, execution_generation, <field>}; older Hermes
+  // takes {choice} plus request_id when known. `field` is "choice" or "answer".
+  function runAnswerBody(item, field, value) {
+    const body = {};
+    if (item && Number.isInteger(item.generation)) {
+      body.request_id = String(item.request_id || "");
+      body.execution_generation = item.generation;
+      body[field] = value;
+      return body;
+    }
+    body[field] = value;
+    if (item && item.request_id) body.request_id = item.request_id;
+    return body;
+  }
+
+  // One clarify answer as Hermes reads it: text, or a JSON array of labels
+  // for a multi-select question (tools/clarify_gateway.py decodes that).
+  function clarifyAnswerText(q, answer) {
+    if (answer == null) return "";
+    if (q && q.multi_select) return JSON.stringify(Array.isArray(answer) ? answer : [answer]);
+    return String(answer);
+  }
+
   root.PhoneParts = {
+    controlApproval, controlQuestion, runControls, runAnswerBody, clarifyAnswerText,
     messageMs, dayKey, dividerLabel, dayBreaks, resolveDatePin,
     clockOptions, stampLabel, stampDetail, messageStamps,
     CLAMP_LINES, clampState, copyText,

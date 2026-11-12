@@ -665,15 +665,110 @@ def lineage_ids(conn, root):
 
 
 def waiting_sessions(runs_db):
-    """Session ids of phone runs waiting for an approval. Only runs started by
-    this page are in this store; desktop approvals are not visible here."""
-    if not os.path.exists(runs_db):
-        return set()
+    """Session ids of phone runs waiting for an approval or an answer. Only runs
+    started by this page are in these stores; desktop approvals are not visible
+    here. *runs_db* is one path or several (one Hermes listener serving several
+    profiles keeps every profile's runs in the default store)."""
     out = set()
-    for status in read_runs(runs_db).values():
-        if status.get("status") == "waiting_for_approval" and status.get("session_id"):
-            out.add(str(status["session_id"]))
+    for path in ([runs_db] if isinstance(runs_db, str) else list(dict.fromkeys(runs_db))):
+        if not os.path.exists(path):
+            continue
+        for status in merge_live(read_runs(path)).values():
+            waiting = status.get("status") == "waiting_for_approval" or status.get("question")
+            if waiting and status.get("session_id"):
+                out.add(str(status["session_id"]))
     return out
+
+
+# Hermes v0.23+ keeps a phone run's open prompts (approval, clarify question)
+# in memory: the run store still says "running" while the run waits. GET
+# /v1/runs/<id> lists them as pending_controls, so a run the store calls
+# running is asked, cached for a moment. A profile that does not own the run
+# answers 404; the one that does is remembered for that run's later alerts.
+RUNNING = ("queued", "running")
+LIVE_TTL = 2.5
+LIVE_MISS_TTL = 30
+_live = {}  # run_id -> (monotonic time, owning profile or None, pending_controls)
+_live_lock = threading.Lock()
+_no_proxy = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def fetch_run(profile, run_id):
+    """The run's status from Hermes, or None when this profile does not have it.
+    OSError when Hermes cannot be reached."""
+    key = profile_key(profile)
+    if not key:
+        return None
+    path = "/v1/runs/" + urllib.parse.quote(run_id, safe="")
+    if profile not in (None, "", "default"):
+        path = "/p/" + urllib.parse.quote(profile, safe="") + path
+    request = urllib.request.Request("http://%s:%d%s" % (UPSTREAM[0], UPSTREAM[1], path),
+                                     headers={"Authorization": "Bearer " + key})
+    try:
+        with _no_proxy.open(request, timeout=1.5) as response:
+            data = json.loads(response.read(1 << 20).decode("utf-8"))
+    except urllib.error.HTTPError:
+        return None
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def live_controls(run_id, hint=None):
+    """(owning profile, pending_controls) of a running phone run; (None, []) when
+    no profile has it or Hermes is not answering."""
+    now = time.monotonic()
+    with _live_lock:
+        hit = _live.get(run_id)
+    if hit and now - hit[0] < (LIVE_TTL if hit[1] else LIVE_MISS_TTL):
+        return hit[1], hit[2]
+    first = (hit[1] if hit and hit[1] else None) or hint
+    names = served_profiles()
+    order = ([first] if first in names else []) + [name for name in names if name != first]
+    found, controls = None, []
+    for name in order:
+        try:
+            data = fetch_run(name, run_id)
+        except OSError:
+            return (hit[1], hit[2]) if hit else (None, [])
+        if data is None:
+            continue
+        found = name
+        pending = data.get("pending_controls")
+        controls = [c for c in pending if isinstance(c, dict)] if isinstance(pending, list) else []
+        break
+    with _live_lock:
+        _live[run_id] = (now, found, controls)
+        for old in [rid for rid, value in _live.items() if now - value[0] > 3600]:
+            del _live[old]
+    return found, controls
+
+
+def merge_live(runs):
+    """Fold v0.23+ pending prompts into the stored statuses (in place): an open
+    approval makes a running run "waiting_for_approval" with approval.request_id,
+    an open question adds "question". A run's owning profile, once known, is its
+    "_profile". Older Hermes writes the approval itself and is left alone."""
+    for run_id, status in runs.items():
+        state = str(status.get("status") or "")
+        if state not in RUNNING or status.get("approval"):
+            with _live_lock:
+                hit = _live.get(run_id)
+            if hit and hit[1]:
+                status["_profile"] = hit[1]
+            continue
+        profile, controls = live_controls(run_id, status.get("_profile"))
+        if profile is None:
+            continue
+        status["_profile"] = profile
+        approval = next((c for c in controls if c.get("kind") == "approval"), None)
+        question = next((c for c in controls if c.get("kind") == "clarify"), None)
+        if approval:
+            status["status"] = "waiting_for_approval"
+            status["approval"] = {"request_id": str(approval.get("prompt_id") or "")}
+        elif question:
+            status["question"] = {"request_id": str(question.get("prompt_id") or "")}
+    return runs
 
 
 def active_sessions(db_path=None, runs_db=None, approvals=None):
@@ -1068,8 +1163,9 @@ def all_active(with_reads=True):
         for item in items:
             item["profile"] = name
         try:
+            # The default store too: one listener serving several profiles keeps their runs there.
             part = active_sessions(profile_file(name, "state.db", STATE_DB),
-                                   profile_file(name, "runs_idempotency.db", RUNS_DB), items)
+                                   [profile_file(name, "runs_idempotency.db", RUNS_DB), RUNS_DB], items)
         except sqlite3.Error as exc:
             log("active check (%s): %s" % (name, type(exc).__name__))
             failed = failed or name == "default"
@@ -2403,7 +2499,13 @@ def serve_run_approval(client, head, local, lines, leftover, upstream_addr, api_
             log("run approval refused: %s" % exc)
             json_error(client, 403, "Forbidden", "faceid_required", "Face ID check failed. Try again.")
             return
-    body = json.dumps({"choice": choice, "request_id": request_id} if request_id else {"choice": choice}).encode()
+    generation = data.get("execution_generation")
+    if type(generation) is int and request_id:
+        # Hermes v0.23+ answers a prompt only with exactly these three fields.
+        forward = {"request_id": request_id, "execution_generation": generation, "choice": choice}
+    else:
+        forward = {"choice": choice, "request_id": request_id} if request_id else {"choice": choice}
+    body = json.dumps(forward).encode()
     method, target, _lines = split_request(head)
     out = [("%s %s HTTP/1.1" % (method, target)).encode("ascii"), b"Content-Type: application/json",
            b"Content-Length: %d" % len(body)]
@@ -2900,6 +3002,15 @@ def check_runs(config, runs, known, alerted):
             if send_alert(config, "%s is waiting for your approval." % APP_NAME, True, push):
                 alerted.add(key)
                 log("alert sent: approval")
+        elif status.get("question"):
+            # A v0.23+ phone run asking a question (merge_live found it).
+            key = "%s:q:%s" % (run_id, status["question"].get("request_id") or status.get("updated_at"))
+            if key in alerted or watching(run_id):
+                continue
+            push = push_alert(status.get("_profile"), status.get("session_id"), "Has a question for you.")
+            if send_alert(config, "%s has a question for you." % APP_NAME, True, push):
+                alerted.add(key)
+                log("alert sent: question")
         elif now in TERMINAL and before is not None and before not in TERMINAL:
             # Stop is almost always the owner's own tap; nothing to report.
             if now == "cancelled" or watching(run_id):
@@ -2943,6 +3054,7 @@ def watch_runs():
                         for run_id, status in read_runs(profile_file(name, "runs_idempotency.db", RUNS_DB)).items():
                             status["_profile"] = name
                             runs[run_id] = status
+                merge_live(runs)
                 if known is None:
                     # Start from what is already there, so a restart does not
                     # replay old finishes. A pending approval still alerts.

@@ -51,6 +51,8 @@ Store app and no cloud service. Setup and settings: [README.md](README.md).
   Telegram can be answered on the phone.
 - **Question cards.** The desktop's question cards (choices, several choices or free text) show
   on the phone. Answer there and the desktop card closes.
+- **Hermes v0.23+ prompts in phone chats.** Approvals and questions in chats started on the phone
+  show as cards and can be answered there, alerts included, on Hermes v0.23 and on older versions.
 
 ## Alerts
 

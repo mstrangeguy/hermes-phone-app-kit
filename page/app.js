@@ -1037,7 +1037,7 @@ function refreshBadge() {
 function sessionDot(id) {
   const run = liveRun(id);
   if (run) {
-    return run.approvals && run.approvals.length ? "approval" : "working";
+    return (run.approvals && run.approvals.length) || (run.questions && run.questions.length) ? "approval" : "working";
   }
   if (DESKTOP.list.some((a) => Array.isArray(a.sessions) && a.sessions.includes(id) && !a.sent)) return "approval";
   const live = ACTIVE.map[id];
@@ -3797,6 +3797,7 @@ function userNode(run) {
 // with only polling, the run status's last_event is all there is.
 function runPhase(run) {
   if (run.approvals.length) return { label: "Waiting for your approval", since: run.phaseSince, wait: true };
+  if (run.questions && run.questions.length) return { label: "Waiting for your answer", since: run.phaseSince, wait: true };
   if (run.via === "gateway") {
     // No stream and no run status here: only the lease and the saved rows.
     const label = !run.admissionId ? "Sending to Hermes…" : run.gatewayState === "working" ? "Working" : "Queued in Hermes";
@@ -4133,6 +4134,8 @@ function paintQuick() {
 // Allow takes a second tap.
 const DESKTOP = { list: [], sig: "" };
 const PHONE_CHOICES = ["once", "deny"];
+// 409 codes meaning the prompt is already answered or its run turn moved on.
+const GONE_CODES = ["approval_not_pending", "stale_generation"];
 const ARM_MS = 4000;
 
 function desktopApprovalsHere() {
@@ -4179,7 +4182,15 @@ function renderApprovals() {
   }
   const here = desktopApprovalsHere();
   for (const approval of here) if (approval.kind !== "clarify") root.append(approvalCard(null, approval));
-  paintQuestions(here.filter((a) => a.kind === "clarify"));
+  paintQuestions(questionsHere());
+}
+
+// Open questions in the chat on screen: this page's own run first (v0.23+
+// clarify prompts), then the ones the desktop reported.
+function questionsHere() {
+  const run = liveRun(state.sessionId);
+  const own = run && Array.isArray(run.questions) ? run.questions : [];
+  return own.concat(desktopApprovalsHere().filter((a) => a.kind === "clarify"));
 }
 
 // Questions Hermes asked in a desktop chat (the clarify card), answered here.
@@ -4208,7 +4219,7 @@ function paintQuestions(list, force) {
 }
 
 function repaintQuestions() {
-  paintQuestions(desktopApprovalsHere().filter((a) => a.kind === "clarify"), true);
+  paintQuestions(questionsHere(), true);
 }
 
 function questionCard(item) {
@@ -4321,7 +4332,40 @@ function answerOf(item, q) {
   return typed || picked || null;
 }
 
+// A phone run's question: one prompt, one answer, straight to Hermes.
+async function answerRunQuestion(item, button) {
+  button.disabled = true;
+  item.error = "";
+  const q = item.questions[0];
+  const body = PhoneParts.runAnswerBody(item, "answer", PhoneParts.clarifyAnswerText(q, answerOf(item, q)));
+  const settle = () => {
+    const run = liveRun(item.sessionId);
+    if (run) dropControl(run, "questions", item.request_id);
+    renderApprovals();
+    renderLive();
+    paintRunChrome();
+  };
+  try {
+    const res = await api(inProfile(item.profile, "/v1/runs/" + encodeURIComponent(item.runId) + "/clarify"), {
+      method: "POST",
+      body: JSON.stringify(body)
+    });
+    if (res.status === 409 && GONE_CODES.includes(await errorCode(res.clone()))) return settle();
+    if (!res.ok) {
+      item.error = await errorMessage(res);
+      repaintQuestions();
+      return;
+    }
+    settle();
+  } catch (e) {
+    if (e.status === 401) return showKey(e.message);
+    item.error = e.message || "Could not send the answer";
+    repaintQuestions();
+  }
+}
+
 async function answerQuestions(item, button) {
+  if (item.runId) return answerRunQuestion(item, button);
   button.disabled = true;
   item.error = "";
   const answers = {};
@@ -4471,8 +4515,9 @@ async function approveWithFaceId(run, approval, button) {
 async function decide(run, approval, choice, button, assertion) {
   button.disabled = true;
   approval.error = "";
-  const body = { choice };
-  if (approval.request_id) body.request_id = approval.request_id;
+  // v0.23+ takes exactly {request_id, execution_generation, choice}; the proxy
+  // checks and strips the Face ID signature before it goes on.
+  const body = PhoneParts.runAnswerBody(approval, "choice", choice);
   if (assertion) body.assertion = assertion;
   try {
     const res = await api(inProfile(run.profile, "/v1/runs/" + encodeURIComponent(run.runId) + "/approval"), {
@@ -4480,7 +4525,7 @@ async function decide(run, approval, choice, button, assertion) {
       body: JSON.stringify(body)
     });
     if (!res.ok) {
-      if (res.status === 409 && await errorCode(res) === "approval_not_pending") {
+      if (res.status === 409 && GONE_CODES.includes(await errorCode(res))) {
         run.approvals = run.approvals.filter((item) => item !== approval);
         renderLive();
         paintRunChrome();
@@ -4533,18 +4578,47 @@ async function decideDesktop(approval, choice, button, assertion) {
   }
 }
 
+// One approval from the stream or a run status. Hermes v0.23+ names it
+// prompt_id and adds execution_generation; older Hermes sends request_id.
 function addApproval(run, event) {
-  const id = event.request_id || "";
+  const approval = PhoneParts.controlApproval(event);
+  if (!approval) return;
+  const id = approval.request_id;
   if (id && run.approvals.some((item) => item.request_id === id)) return;
-  run.approvals.push({
-    request_id: id,
-    command: event.command || "",
-    description: event.description || "",
-    choices: event.choices || ["once", "deny"],
-    smart_denied: Boolean(event.smart_denied),
-    error: ""
-  });
+  approval.error = "";
+  run.approvals.push(approval);
   run.statusText = "Waiting for approval";
+}
+
+// A question Hermes asked in a phone-started run (v0.23+ clarify prompt).
+// Answered with POST /v1/runs/<id>/clarify; shown with the desktop question cards.
+function addRunQuestion(run, event) {
+  const item = PhoneParts.controlQuestion(event);
+  if (!item) return;
+  run.questions = run.questions || [];
+  if (run.questions.some((q) => q.request_id === item.request_id)) return;
+  run.questions.push(Object.assign(item, { runId: run.runId, profile: run.profile, sessionId: run.sessionId }));
+  run.statusText = "Waiting for your answer";
+}
+
+// Bring a run's open prompts in line with a polled run status. Cards already
+// on screen keep their object (armed, picks, typed text survive the poll).
+function syncControls(run, status) {
+  const found = PhoneParts.runControls(status);
+  const had = run.approvals.length + (run.questions || []).length;
+  run.approvals = found.approvals.map((a) =>
+    run.approvals.find((old) => old.request_id === a.request_id) || Object.assign(a, { error: "" }));
+  run.questions = found.questions.map((q) =>
+    (run.questions || []).find((old) => old.request_id === q.request_id) ||
+    Object.assign(q, { runId: run.runId, profile: run.profile, sessionId: run.sessionId }));
+  if (run.approvals.length) run.statusText = "Waiting for approval";
+  else if (run.questions.length) run.statusText = "Waiting for your answer";
+  else if (had && status.status === "running") run.statusText = REPLYING;
+}
+
+function dropControl(run, list, id) {
+  run[list] = (run[list] || []).filter((item) => !id || item.request_id !== id);
+  if (!run.approvals.length && !(run.questions || []).length) run.statusText = REPLYING;
 }
 
 function liveTextBlock(run) {
@@ -4626,9 +4700,12 @@ function onRunEvent(run, event) {
     run.stopping = true;
   } else if (name === "approval.request") {
     addApproval(run, event);
-  } else if (name === "approval.responded") {
-    run.approvals = run.approvals.filter((item) => !event.request_id || item.request_id !== event.request_id);
-    run.statusText = REPLYING;
+  } else if (name === "clarify.request") {
+    addRunQuestion(run, event);
+  } else if (name === "approval.responded" || name === "approval.settled") {
+    dropControl(run, "approvals", event.request_id || event.prompt_id);
+  } else if (name === "clarify.settled") {
+    dropControl(run, "questions", event.prompt_id || event.request_id);
   } else if (name === "run.completed" || name === "run.failed" || name === "run.cancelled" || name === "run.interrupted") {
     finishRun(run, event);
     return;
@@ -4681,6 +4758,7 @@ function finishRun(run, event) {
     run.statusText = "";
   }
   run.approvals = [];
+  run.questions = [];
   const sessionId = run.sessionId;
   // Finished: drop it, unless its session is open and history does not have
   // the reply yet; then it stays on screen (done) until history catches up.
@@ -4790,12 +4868,7 @@ async function pollRun(run) {
       run.phaseSince = Date.now();
       run.sawEvent = true;
     }
-    if (status.status === "waiting_for_approval" && status.approval) {
-      addApproval(run, status.approval);
-    } else if (run.approvals.length) {
-      run.approvals = [];
-      if (status.status === "running") run.statusText = REPLYING;
-    }
+    syncControls(run, status);
     if (["completed", "failed", "cancelled", "interrupted"].includes(status.status)) {
       finishRun(run, status);
       return;
@@ -4834,6 +4907,7 @@ function failStart(run, message) {
   run.blocks.push({ kind: "note", text: message });
   run.statusText = "";
   run.approvals = [];
+  run.questions = [];
   dropRun(run);
   saveRuns();
   keepNotes(run);
@@ -5056,6 +5130,7 @@ function gatewayLost(run, message) {
   run.blocks.push({ kind: "note", text: message });
   run.statusText = "";
   run.approvals = [];
+  run.questions = [];
   dropRun(run);
   keepNotes(run);
   paintRunChrome();
@@ -5270,7 +5345,7 @@ async function steerRun(text) {
       $("draft").style.height = "auto";
       run.blocks.push({ kind: "steer", text });
     } else if (res.status === 409) {
-      notice(run.approvals.length
+      notice(run.approvals.length || (run.questions && run.questions.length)
         ? "Answer the approval first. Your guidance is still in the box."
         : "Hermes is not taking guidance right now. Your text is still in the box.");
     } else {
@@ -5776,7 +5851,8 @@ function tickPlanTime() {
 // desktop's pending list or the phone's own run.
 function planBlocking() {
   const run = liveRun(state.sessionId);
-  return desktopApprovalsHere().length > 0 || Boolean(run && Array.isArray(run.approvals) && run.approvals.length);
+  return desktopApprovalsHere().length > 0 || Boolean(run && Array.isArray(run.approvals) && run.approvals.length) ||
+    Boolean(run && Array.isArray(run.questions) && run.questions.length);
 }
 
 // When the reply holding the list ended: the newest message's time (ms), or
@@ -6362,7 +6438,7 @@ async function resumeRuns() {
         phaseSince: status.updated_at ? status.updated_at * 1000 : Date.now(),
         lastEvent: status.last_event || ""
       };
-      if (status.status === "waiting_for_approval" && status.approval) addApproval(run, status.approval);
+      syncControls(run, status);
       addRun(run);
       resumed.push(run);
     } catch (e) {
