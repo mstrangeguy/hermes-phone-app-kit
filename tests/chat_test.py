@@ -730,7 +730,7 @@ check("step name on its own line under the bar, header keeps count, tag, %",
       "box.append(top, bar);\n  if (stepText)" in app and ".plan-step {" in css and
       "text-overflow: ellipsis" in css.split(".plan-step {")[1].split("}")[0])
 check("pin and archive use Hermes's PATCH", re.search(r'method: "PATCH",\s*body: JSON.stringify\(\{ \[flag\]: value \}\)', app))
-check("phone turns told reactions cannot attach yet", "react_to_message) cannot attach" in app)
+check("phone turns no longer told reactions cannot attach (Hermes v0.23.0+)", "react_to_message" not in app.split("const PHONE_INSTRUCTIONS")[1].split(";")[0])
 check("search results replace the list", re.search(r"if \(searching\(\)\) \{\s*renderSearch\(root\)", app))
 check("chat title opens the session menu", '$("chat-title").addEventListener("click", () => toggleMenu())' in app and
       'id="chat-title" role="button"' in html)

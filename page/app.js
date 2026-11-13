@@ -3233,8 +3233,7 @@ const PHONE_INSTRUCTIONS =
   "sends are saved on this Mac and listed in the message, one per line, as @file:<path> (before the text) " +
   "or @image:<path> (after it); a path with spaces is wrapped in backticks. Pictures also arrive as images. A file's " +
   "contents are NOT included: open each @file: path with your file tools (read_file, or the pdf skill " +
-  "for PDFs) before answering about it. Emoji reactions (react_to_message) cannot attach to messages " +
-  "sent from the phone yet; answer in words instead.";
+  "for PDFs) before answering about it.";
 
 // Same quoting as Hermes's format_reference_value, so @image:/@file: lines read back whole.
 function refValue(path) {
