@@ -36,7 +36,7 @@ Run Python for this app with `scripts/py`, never a hardcoded interpreter path. I
 Run every suite with Hermes's venv Python, each with its own empty scratch folder:
 
 ```bash
-for t in plugin faceid approvals alerts busy profiles cron look pictures bots chat webpush desktopsend; do
+for t in plugin faceid approvals alerts busy profiles cron look pictures bots chat webpush desktopsend alertlog sw; do
   scripts/py -I tests/${t}_test.py "$PWD" "$(mktemp -d)" | tail -1
 done
 ```
@@ -45,9 +45,16 @@ done
 - Re-run `plugin_test.py` after every `hermes update`. It drives Hermes's real approval code; set `HERMES_AGENT_DIR` to test another checkout. A bare `git clone` of Hermes has no Python of its own: add `PHONE_APP_PYTHON="$(scripts/py --which)"`. Read its result with `grep passed`, not `tail -1`: importing `tui_gateway` reorders its output.
 - Any test importing `serve` or `faceid` must point `serve.CONFIG_PATH`, `faceid.CONFIG_PATH` and `faceid.SETUP_PATH` into its scratch folder. Otherwise a live enrolled passkey locks the API-key path and the test fails for the wrong reason. Keep the `FAIL ISOLATION` guard in new tests.
 - `desktopsend_test.py` injects a fake gateway client into `desktop_send.py`, both directly and as a fake `hermes_cli/gateway_client.py` in a scratch agent folder, so the real subprocess path runs. Its "old Hermes" folder holds a `gateway_client.py` that raises `ModuleNotFoundError`: on v0.22 Hermes's editable-install finder would otherwise import the real client when the file is merely absent. It never talks to a real gateway. Keep page rules for gateway sends in `page/chatparts.js` so node can test them.
+- Tests that send an alert or read the Status screen must point `serve.LOG_PATH` (or `serve.ALERT_LOG_PATH`) into the scratch folder, or they read and write the live `alert-log.jsonl`. `alertlog_test.py` checks this with its `FAIL ISOLATION` guard; a test that swaps in its own `push_alert` must accept the `kind` argument.
 - Never test alerts by starting a real run. `alerts_test.py` uses fake Home Assistant and Telegram servers. To check the real channel once: `serve.py --notify "test"`.
 
 ## Troubleshooting
+
+- **"What was the alert I got at 7:05?"** Read `alert-log.jsonl` in the checkout: one JSON line per
+  alert the proxy sent or tried to send (`at` local time with zone, `kind`, `channel`, `title` = chat
+  title, `body`, `link` = `#s=<session>`, `session` = `profile/id`, `ok`, `detail`). Kept 30 days.
+  Match on `at`, then open the chat from `session`. Alerts from other apps (Teams, Outlook) are not in it.
+  Every `serve.log` line is timestamped too (local time).
 
 - **403 "limited to its owner's Tailscale login":** the phone's Tailscale login is not in `allowed-logins.txt`. Lines starting with `#` are comments.
 - **"Locked" loop or Face ID fails:** the passkey is bound to the host name in `faceid.json`. If the Mac's tailnet name changed, re-run `install.sh` and choose to reset Face ID, then enrol again with a new setup code.

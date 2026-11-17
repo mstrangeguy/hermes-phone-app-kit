@@ -945,4 +945,5 @@ div.status-card { cursor: default; }
 .status-card.state-warn .when { color: #f59e0b; }
 .status-lines { margin: 4px 0 0 14px; padding: 0 0 0 14px; color: var(--muted-fg); font-size: 14px; line-height: 1.4; }
 .status-lines li { margin: 2px 0; overflow-wrap: anywhere; }
+.status-lines li.status-link { color: var(--fg); cursor: pointer; text-decoration: underline; text-decoration-color: var(--border); text-underline-offset: 3px; }
 .status-stale { color: #f59e0b; }

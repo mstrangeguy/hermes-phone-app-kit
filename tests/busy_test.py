@@ -217,7 +217,7 @@ check("a finished run takes the owner learned while it ran",
 # Alerts: an approval alerts as before, a question alerts once as a question.
 sent_alerts = []
 serve.send_alert = lambda config, text, urgent, push=None: sent_alerts.append(text) or True
-serve.push_alert = lambda profile, sid, body: {"profile": profile, "body": body}
+serve.push_alert = lambda profile, sid, body, kind="": {"profile": profile, "body": body}
 known, alerted = {}, set()
 serve.check_runs({}, merged, known, alerted)
 check("v0.23 approval alerts", any("waiting for your approval" in t for t in sent_alerts), str(sent_alerts))

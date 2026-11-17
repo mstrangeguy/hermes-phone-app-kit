@@ -22,6 +22,7 @@ import serve  # noqa: E402
 import faceid  # noqa: E402
 
 serve.CONFIG_PATH = os.path.join(work, "config.json")
+serve.ALERT_LOG_PATH = os.path.join(work, "alert-log.jsonl")  # never the live alert log
 faceid.CONFIG_PATH = os.path.join(work, "faceid.json")
 faceid.SETUP_PATH = os.path.join(work, "faceid-setup.json")
 for _path in (faceid.CONFIG_PATH, faceid.SETUP_PATH, serve.CONFIG_PATH):
@@ -238,8 +239,8 @@ with open(serve.CONFIG_PATH, "w") as handle:
 status, body = call("/phone-api/profiles")
 check("status: on, and the opening screen by default", body.get("status") is True and body.get("status_start") is True)
 status, body = call("/phone-api/status")
-check("status: no file yet -> stale, cron card only",
-      status == 200 and body["enabled"] and body["stale"] and [c["id"] for c in body["cards"]] == ["cron"])
+check("status: no file yet -> stale, only the proxy's own cards (Recent alerts, cron)",
+      status == 200 and body["enabled"] and body["stale"] and [c["id"] for c in body["cards"]] == ["alerts", "cron"])
 cron_card = body["cards"][-1]
 check("status: cron card lists the failed job (last_error) and links to it",
       cron_card["state"] == "bad" and cron_card["summary"] == "1 failed"
@@ -258,8 +259,9 @@ check("status: card cleaned", cards[0] == {"id": "house", "title": "Main House",
                                           "lines": ["one", "x" * 200], "link": "#s=20260101_120000_abc123&p=ops"})
 check("status: unknown state -> info, script link dropped", cards[1]["state"] == "info" and cards[1]["link"] == "")
 check("status: outside link dropped", cards[2]["link"] == "")
-check("status: untitled and non-dict cards skipped, at most 12 from the file plus cron",
-      len(cards) <= serve.STATUS_CARDS_MAX + 1 and cards[-1]["id"] == "cron" and all(c["title"] for c in cards))
+check("status: untitled and non-dict cards skipped, at most 12 from the file plus alerts and cron",
+      len(cards) <= serve.STATUS_CARDS_MAX + 2 and [c["id"] for c in cards[-2:]] == ["alerts", "cron"]
+      and all(c["title"] for c in cards))
 with open(cards_path, "w") as handle:
     json.dump({"updated": iso(time.time() - 3600), "cards": []}, handle)
 check("status: an hour-old file is stale", call("/phone-api/status")[1]["stale"] is True)

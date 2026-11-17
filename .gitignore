@@ -6,6 +6,7 @@ faceid-setup.json
 update-check.json
 alerts.json
 serve.log
+alert-log.jsonl
 serve.pid
 __pycache__/
 *.tmp

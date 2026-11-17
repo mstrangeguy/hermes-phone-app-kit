@@ -106,7 +106,7 @@ Written by the installer. Edit it by hand to change alerts; the alerts block is 
 | `upstream_port` | Hermes API port. Default 8642. |
 | `hermes_home` | Hermes home. Default `~/.hermes`. |
 | `desktop_image_refs` | `true` also adds the phone's `@image:` lines to messages sent into Desktop chats on Hermes v0.22+, for Desktops older than v0.22 that show only those. Off by default: with it on, the model may get each picture twice. Read on each send. |
-| `status` | Optional Status screen, e.g. `{"enabled": true}`. Off when missing. When on, it is first in the side panel and the screen the app opens on (unless `"start": false`). It shows cards from a local file (`"file"`, default `status-cards.json` here) that something on this Mac writes, plus a card of the proxy's own: cron jobs whose last run failed. Read on each request. See "Status screen" below. |
+| `status` | Optional Status screen, e.g. `{"enabled": true}`. Off when missing. When on, it is first in the side panel and the screen the app opens on (unless `"start": false`). It shows cards from a local file (`"file"`, default `status-cards.json` here) that something on this Mac writes, plus two cards of the proxy's own: Recent alerts and cron jobs whose last run failed. Read on each request. See "Status screen" below. |
 | `alerts.channel` | `webpush`, `telegram`, `homeassistant` or `none`. |
 | `alerts.chat_id` | Telegram chat id. Empty means your Hermes home channel (`TELEGRAM_HOME_CHANNEL`, set with `/sethome`). |
 | `alerts.notify` | Home Assistant notify service, e.g. `mobile_app_my_iphone`. Uses `HASS_URL` and `HASS_TOKEN` from `.env`. |
@@ -131,7 +131,7 @@ Telegram and Home Assistant alerts are generic, for example "Hermes is waiting f
 
 ### Status screen
 
-A read-only screen of cards, one per thing worth a glance. It is off until `config.json` has `"status": {"enabled": true}`. The app makes no cards of its own except **Cron jobs** (failed jobs across the profiles it serves). The rest come from a JSON file any local script or monitor can write:
+A read-only screen of cards, one per thing worth a glance. It is off until `config.json` has `"status": {"enabled": true}`. The app makes two cards of its own: **Recent alerts** (the last 10 alerts from the alert log below; tap one to open its chat) and **Cron jobs** (failed jobs across the profiles it serves). The rest come from a JSON file any local script or monitor can write:
 
 ```json
 {"updated": "2026-11-01T20:30:00-08:00",
@@ -152,6 +152,7 @@ This app is a remote control for an agent that can run commands on your Mac. Rea
 - Attachments (the + in the message box opens the iOS picker: Photo Library, Take Photo, Choose File) are saved where the Hermes desktop app saves its own: pictures in `<Hermes home>/images/`, other files in `<Hermes home>/attachments/` under their own name (never overwriting; files 600). A photo is shrunk on the phone first, which also drops its location data. Files are sent unchanged, up to 25 MB. The message lists them as the desktop's `@image:` / `@file:` lines, so both apps show them from history; Hermes opens a file with its own tools when it reads the message. Delete old ones there whenever you like. Pictures Hermes sends back (`MEDIA:/path` in a reply) are fetched through the proxy: image files only, judged by their contents, from your home or temp folders only, behind the same login and Face ID checks. Paths are never logged.
 - Messages into Desktop chats on Hermes v0.22+ go through `desktop_send.py`, which the proxy runs as a separate process on Hermes's Python. It connects to the gateway the way the desktop app and `hermes chat --resume` do: as the same macOS user, through the gateway's private socket, with no password or key. It passes on only pictures this page uploaded. `serve.log` gets one line per send, with no text, paths or chat id.
 - The proxy reads Hermes's session database directly for the list extras, cron runs and search (read-only), and writes to it in one place only: the reactions field of a message, when you react. Hermes's own API has no reaction or full-text search routes. Search queries are not logged.
+- Every alert the proxy sends or fails to send is written to `alert-log.jsonl` here: time, kind, channel, the alert's title and text as sent, the chat link, and whether it arrived. Kept 30 days, owner-only (600), never committed. Alert titles are chat titles, which can hold names you'd keep private; that is why the file stays on this Mac. No keys or tokens are logged.
 - If this Mac is managed by an employer, check with them before opening a remote path into it.
 
 ## Everyday commands
@@ -159,7 +160,8 @@ This app is a remote control for an agent that can run commands on your Mac. Rea
 ```bash
 cd ~/.hermes/phone-chat
 launchctl kickstart -k gui/$(id -u)/com.hermes.phone-chat     # restart the proxy
-tail -f serve.log                                              # proxy log (no keys or logins are logged)
+tail -f serve.log                                              # proxy log, every line timestamped (no keys or logins are logged)
+tail -5 alert-log.jsonl                                        # the last 5 alerts: time, chat, text, delivered or not
 scripts/py -I serve.py --notify "test"                        # send a test alert
 scripts/py -I serve.py --notify "body" --title "T" --urgent   # same, with a title; another local monitor can use this as its backup channel
 scripts/update-check.sh --force                               # run every test now

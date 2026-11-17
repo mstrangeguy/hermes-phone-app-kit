@@ -1589,11 +1589,19 @@ function statusCard(card) {
   if (card.lines && card.lines.length) {
     const list = document.createElement("ul");
     list.className = "status-lines";
-    for (const line of card.lines) {
+    card.lines.forEach((line, i) => {
       const li = document.createElement("li");
       li.textContent = line;
+      // A line with its own link (Recent alerts) opens that chat, not the card's link.
+      const link = Array.isArray(card.line_links) ? card.line_links[i] : "";
+      if (link && !card.link) {
+        li.className = "status-link";
+        li.setAttribute("role", "button");
+        li.tabIndex = 0;
+        li.addEventListener("click", () => openStatusLink(link));
+      }
       list.append(li);
-    }
+    });
     el.append(list);
   }
   if (card.link) el.addEventListener("click", () => openStatusLink(card.link));
@@ -1647,7 +1655,7 @@ function renderStatusSheet() {
   body.textContent = "";
   const note = document.createElement("p");
   note.className = "sheet-note";
-  note.textContent = "Read-only. Refreshes every minute while open. Tap a card to open its chat.";
+  note.textContent = "Read-only. Refreshes every minute while open. Tap a card to open its chat; under Recent alerts, tap an alert to open the chat it came from.";
   body.append(note);
 }
 

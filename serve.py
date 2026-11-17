@@ -8,6 +8,7 @@ Every request must carry an allowed Tailscale login. Listens on 127.0.0.1 only.
 """
 
 import datetime
+import fcntl
 import hmac
 import json
 import os
@@ -91,7 +92,8 @@ HOP_BY_HOP = {
 
 
 def log(message):
-    sys.stderr.write(message + "\n")
+    # Local date and time on every line, so a problem can be matched to when it happened.
+    sys.stderr.write(time.strftime("%Y-%m-%d %H:%M:%S ") + message + "\n")
     sys.stderr.flush()
 
 
@@ -1865,12 +1867,48 @@ def cron_failed_card(profiles):
                 failed[0]["id"], "" if failed[0].get("profile") in (None, "", "default") else "&p=" + failed[0]["profile"])}
 
 
+def alert_when(ts):
+    """'Tue Nov 17 07:05 PST': the date and zone the owner uses for times."""
+    t = time.localtime(float(ts))
+    return "%s %d %s" % (time.strftime("%a %b", t), t.tm_mday, time.strftime("%H:%M %Z", t))
+
+
+ALERT_KIND_TEXT = {"notify": "", "test": "Test push"}
+
+
+def alerts_card(now=None):
+    """The Status screen's Recent alerts card: the last ALERT_CARD_LINES alerts,
+    each line opening its chat when the alert had one."""
+    entries = read_alert_log(ALERT_CARD_LINES, now)
+    if not entries:
+        return {"id": "alerts", "title": "Recent alerts", "state": "ok",
+                "summary": "None in %d days" % ALERT_LOG_DAYS, "lines": [], "line_links": [], "link": ""}
+    lines, links = [], []
+    for e in entries:
+        parts = [alert_when(e.get("ts") or 0)]
+        title = status_text(e.get("title"), 80)
+        if title and title != APP_NAME:
+            parts.append(title)
+        parts.append(status_text(e.get("body"), 120) or ALERT_KIND_TEXT.get(e.get("kind"), "") or "Alert")
+        line = " · ".join(parts)
+        if not e.get("ok"):
+            line += " (not delivered: %s)" % status_text(e.get("detail"), 80)
+        lines.append(status_text(line, 260))
+        link = e.get("link") if isinstance(e.get("link"), str) and STATUS_LINK.match(e.get("link") or "") else ""
+        links.append(link)
+    last = entries[0]
+    return {"id": "alerts", "title": "Recent alerts", "state": "info" if last.get("ok") else "bad",
+            "summary": "Last " + time.strftime("%a %H:%M", time.localtime(float(last.get("ts") or 0))),
+            "lines": lines, "line_links": links, "link": ""}
+
+
 def status_body():
     block = status_settings()
     if block is None:
         return {"enabled": False, "cards": []}
     path = os.path.expanduser(str(block.get("file") or STATUS_FILE_DEFAULT))
     updated, age, cards = status_file_cards(path)
+    cards.append(alerts_card())
     cards.append(cron_failed_card(served_profiles()))
     return {"enabled": True, "updated": updated, "stale": age is None or age > STATUS_STALE, "cards": cards}
 
@@ -2374,6 +2412,8 @@ def serve_push(client, target, lines, leftover, method, local):
             message = webpush.declarative(APP_NAME, "Test notification. Tap to open.", push_base(settings))
             sent, problems = webpush.send_all(message, subject, only=endpoint)
             log("web push test: %s" % ("sent" if sent else "failed: " + "; ".join(problems)))
+            record_alert("test", "webpush", APP_NAME, "Test notification. Tap to open.", "", "", False,
+                         bool(sent), "sent" if sent else "failed: " + "; ".join(problems))
             json_ok(client, {"sent": sent, "problems": problems})
         else:
             json_error(client, 404, "Not Found", "not_found", "Unknown")
@@ -2804,10 +2844,98 @@ def reply_preview(profile, session_id):
     return preview_text(row[0]) if row else ""
 
 
-def push_alert(profile, session_id, body):
-    """What a web push shows: the session title, a short line, and the link."""
+def push_alert(profile, session_id, body, kind=""):
+    """What a web push shows: the session title, a short line, and the link.
+    kind (\"reply finished\", \"approval\", ...) only goes to the alert log."""
     return {"title": session_title(profile, session_id) or APP_NAME, "body": body,
-            "link": hash_for(session_id, profile), "session": "%s/%s" % (profile or "default", session_id or "")}
+            "link": hash_for(session_id, profile), "session": "%s/%s" % (profile or "default", session_id or ""),
+            "kind": kind}
+
+
+# Alert log: one JSON line per alert this app tried to send, whatever the
+# channel, kept ALERT_LOG_DAYS. It answers "what was the alert I got at 7:05?"
+# and feeds the Status screen's Recent alerts card. It holds session titles,
+# which can name customers, so it stays on this Mac: mode 0600, git-ignored.
+# The path follows LOG_PATH's folder unless ALERT_LOG_PATH is set, so tests
+# that move LOG_PATH never write into the live log.
+ALERT_LOG_PATH = None
+ALERT_LOG_DAYS = 30
+ALERT_LOG_PRUNE_EVERY = 3600
+ALERT_CARD_LINES = 10
+_alert_log_lock = threading.Lock()
+_alert_log_pruned = [0.0]
+
+
+def alert_log_path():
+    return ALERT_LOG_PATH or os.path.join(os.path.dirname(LOG_PATH), "alert-log.jsonl")
+
+
+def _alert_log_prune(handle, now):
+    """Drop entries older than ALERT_LOG_DAYS, in place (the caller holds the flock)."""
+    handle.seek(0)
+    keep = []
+    cutoff = now - ALERT_LOG_DAYS * 86400
+    for line in handle.read().splitlines():
+        try:
+            if float(json.loads(line).get("ts") or 0) >= cutoff:
+                keep.append(line)
+        except (ValueError, AttributeError, TypeError):
+            continue
+    handle.seek(0)
+    handle.write("".join(k + "\n" for k in keep))
+    handle.truncate()
+
+
+def record_alert(kind, channel, title, body, link, session, urgent, ok, detail=""):
+    """Append one alert to the log. Never raises: a log problem must not stop alerts."""
+    now = time.time()
+    entry = {"ts": round(now, 3),
+             "at": datetime.datetime.fromtimestamp(now).astimezone().isoformat(timespec="seconds"),
+             "kind": str(kind or "alert"), "channel": str(channel or ""),
+             "title": str(title or "")[:200], "body": str(body or "")[:400],
+             "link": str(link or ""), "session": str(session or ""),
+             "urgent": bool(urgent), "ok": bool(ok), "detail": str(detail or "")[:300]}
+    path = alert_log_path()
+    try:
+        with _alert_log_lock:
+            # No O_APPEND: pruning rewrites the file in place. Every writer holds the flock and seeks to the end.
+            fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+            with os.fdopen(fd, "r+", encoding="utf-8") as handle:
+                fcntl.flock(handle, fcntl.LOCK_EX)
+                try:
+                    os.chmod(path, 0o600)
+                    if now - _alert_log_pruned[0] > ALERT_LOG_PRUNE_EVERY:
+                        _alert_log_pruned[0] = now
+                        _alert_log_prune(handle, now)
+                    handle.seek(0, os.SEEK_END)
+                    handle.write(json.dumps(entry) + "\n")
+                    handle.flush()
+                finally:
+                    fcntl.flock(handle, fcntl.LOCK_UN)
+    except (OSError, ValueError) as exc:
+        log("alert log: could not write (%s)" % type(exc).__name__)
+
+
+def read_alert_log(limit=None, now=None):
+    """Logged alerts within ALERT_LOG_DAYS, newest first."""
+    now = time.time() if now is None else now
+    cutoff = now - ALERT_LOG_DAYS * 86400
+    entries = []
+    try:
+        with open(alert_log_path(), encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(entry, dict) and float(entry.get("ts") or 0) >= cutoff:
+                    entries.append(entry)
+    except (OSError, TypeError, ValueError):
+        return []
+    # Newest first; alerts in the same millisecond keep the file's order (later line = newer).
+    order = sorted(range(len(entries)), key=lambda i: (float(entries[i].get("ts") or 0), i), reverse=True)
+    entries = [entries[i] for i in order]
+    return entries[:limit] if limit else entries
 
 
 # A desktop approval alerts only after this long, so answering it at the desk
@@ -2829,7 +2957,8 @@ def check_desktop(config, approvals, alerted, now=None):
             continue
         question = item.get("kind") == "clarify"
         push = push_alert(item.get("profile") or "default", item.get("session_key"),
-                          "Has a question for you." if question else "Waiting for your approval on the desktop.")
+                          "Has a question for you." if question else "Waiting for your approval on the desktop.",
+                          "desktop question" if question else "desktop approval")
         text = ("%s has a question for you." if question else "%s is waiting for your approval on the desktop.") % APP_NAME
         if send_alert(config, text, True, push):
             alerted.add(rid)
@@ -2918,11 +3047,16 @@ def telegram_request(config, message, urgent):
 ALERT_CHANNELS = {"homeassistant": homeassistant_request, "telegram": telegram_request}
 
 
+# Why the last send went the way it did, for the alert log (alert threads only).
+_send_detail = threading.local()
+
+
 def webpush_send(config, push, urgent):
     """One alert to every subscribed phone. iOS gives web push no Time
     Sensitive level, so urgent only raises the push service's Urgency."""
     if not webpush.subscriptions():
         log("alert skipped: no phone has turned notifications on")
+        _send_detail.text = "skipped: no phone has notifications on"
         return False
     message = webpush.declarative(push["title"], push["body"], push_base(config) + (push.get("link") or ""),
                                   badge_for(push.get("session")) if push.get("session") else None)
@@ -2930,9 +3064,11 @@ def webpush_send(config, push, urgent):
         sent, problems = webpush.send_all(message, push_subject(config), urgent)
     except ImportError:
         log("alert failed: web push needs the cryptography package")
-        sent, problems = 0, []
+        sent, problems = 0, ["cryptography package missing"]
     for problem in problems:
         log("alert failed: web push %s" % problem)
+    _send_detail.text = ("sent to %d phone%s" % (sent, "" if sent == 1 else "s")) + (
+        "; failed: " + "; ".join(problems) if problems else "")
     if not sent:
         _last_fail[0] = time.monotonic()
     return bool(sent)
@@ -2940,13 +3076,30 @@ def webpush_send(config, push, urgent):
 
 def send_alert(config, message, urgent, push=None):
     """message is the generic text for Telegram and Home Assistant; push is the
-    web push form (push_alert), defaulting to the app name and message."""
+    web push form (push_alert), defaulting to the app name and message.
+    Every attempt, sent or not, goes to the alert log."""
+    channel = config.get("channel") or "homeassistant"
+    push = push or {"title": APP_NAME, "body": message, "link": ""}
+    _send_detail.text = ""
+    ok = _send_alert(config, channel, message, urgent, push)
+    if channel == "webpush":
+        title, body = push.get("title"), push.get("body")
+    else:
+        title, body = APP_NAME, message
+    record_alert(push.get("kind"), channel, title, body, push.get("link"), push.get("session"),
+                 urgent, ok, getattr(_send_detail, "text", "") or ("sent" if ok else "failed"))
+    return ok
+
+
+def _send_alert(config, channel, message, urgent, push):
     if backing_off():
+        _send_detail.text = "skipped: waiting %ds after a failed send" % FAIL_BACKOFF
         return False
-    if config.get("channel") == "webpush":
-        return webpush_send(config, push or {"title": APP_NAME, "body": message, "link": ""}, urgent)
-    request = ALERT_CHANNELS[config.get("channel") or "homeassistant"](config, message, urgent)
+    if channel == "webpush":
+        return webpush_send(config, push, urgent)
+    request = ALERT_CHANNELS[channel](config, message, urgent)
     if request is None:
+        _send_detail.text = "skipped: channel not set up (see serve.log)"
         _last_fail[0] = time.monotonic()
         return False
     try:
@@ -2956,12 +3109,15 @@ def send_alert(config, message, urgent, push=None):
     except urllib.error.HTTPError as exc:
         # Only the status: the Telegram request URL carries the bot token.
         log("alert failed: HTTP %d" % exc.code)
+        _send_detail.text = "failed: HTTP %d" % exc.code
     except urllib.error.URLError as exc:
         # The reason (refused, unreachable, DNS) names no secret; the URL and token stay out.
         reason = exc.reason
         log("alert failed: URLError %s %s" % (type(reason).__name__, getattr(reason, "errno", "") or ""))
+        _send_detail.text = "failed: %s" % type(reason).__name__
     except Exception as exc:
         log("alert failed: %s" % type(exc).__name__)
+        _send_detail.text = "failed: %s" % type(exc).__name__
     _last_fail[0] = time.monotonic()
     return False
 
@@ -2998,7 +3154,7 @@ def check_runs(config, runs, known, alerted):
             key = "%s:%s" % (run_id, approval.get("request_id") or status.get("updated_at"))
             if key in alerted or watching(run_id):
                 continue
-            push = push_alert(status.get("_profile"), status.get("session_id"), "Waiting for your approval.")
+            push = push_alert(status.get("_profile"), status.get("session_id"), "Waiting for your approval.", "approval")
             if send_alert(config, "%s is waiting for your approval." % APP_NAME, True, push):
                 alerted.add(key)
                 log("alert sent: approval")
@@ -3007,7 +3163,7 @@ def check_runs(config, runs, known, alerted):
             key = "%s:q:%s" % (run_id, status["question"].get("request_id") or status.get("updated_at"))
             if key in alerted or watching(run_id):
                 continue
-            push = push_alert(status.get("_profile"), status.get("session_id"), "Has a question for you.")
+            push = push_alert(status.get("_profile"), status.get("session_id"), "Has a question for you.", "question")
             if send_alert(config, "%s has a question for you." % APP_NAME, True, push):
                 alerted.add(key)
                 log("alert sent: question")
@@ -3020,7 +3176,8 @@ def check_runs(config, runs, known, alerted):
             if now == "completed" and config.get("preview") is True:
                 # Web push only: Telegram and Home Assistant alerts stay generic.
                 body = reply_preview(status.get("_profile"), status.get("session_id")) or body
-            push = push_alert(status.get("_profile"), status.get("session_id"), body)
+            push = push_alert(status.get("_profile"), status.get("session_id"), body,
+                              "reply finished" if now == "completed" else "reply failed")
             if send_alert(config, text, False, push):
                 log("alert sent: %s" % now)
     for run_id in [r for r in known if r not in runs]:
@@ -3196,7 +3353,7 @@ def main(argv):
         if config is None:
             print("alerts are off (no valid \"alerts\" block in config.json)")
             sys.exit(2)
-        push = {"title": title or APP_NAME, "body": text, "link": link}
+        push = {"title": title or APP_NAME, "body": text, "link": link, "kind": "notify"}
         ok = send_alert(config, ("%s: %s" % (title, text)) if title else text, urgent, push)
         print("alert sent via %s" % config["channel"] if ok else "alert failed, see the line above")
         sys.exit(0 if ok else 1)

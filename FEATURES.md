@@ -65,6 +65,9 @@ Store app and no cloud service. Setup and settings: [README.md](README.md).
 - **Optional reply preview**: the first sentence of a finished reply in the alert.
 - **Unread badge** on the Home Screen icon, shared with the desktop's read state.
 - **Use it as a backup alert channel** for other monitors on the Mac (`serve.py --notify`).
+- **Alert history.** Every alert the app sends, or fails to send, is kept on the Mac for 30 days
+  with its date and time, the chat it came from and what it said. Ask Hermes "what was the alert
+  I got around 7:05?" and it can look it up. Nothing leaves the Mac.
 
 ## Finding things
 
@@ -80,6 +83,8 @@ Store app and no cloud service. Setup and settings: [README.md](README.md).
 
 - **Glance cards** from any local script or monitor (OK / warning / bad), plus a card of failed
   cron jobs. Says so if the monitor writing the cards has stopped.
+- **Recent alerts card**: your last 10 alerts with date and time, and which ones didn't arrive.
+  Tap one to open the chat it came from.
 
 ## Security
 
