@@ -325,6 +325,25 @@
     return content && typeof content.text === "string" ? content.text : "";
   }
 
+  // A user row the person wrote. Hermes v0.23 saves a message sent through
+  // /v1/runs (this page) with display_kind "internal_notification", the kind
+  // it also gives its own notices (cron output, background reports), and the
+  // field that tells them apart (display_metadata.submission_id) is not in the
+  // messages API. Hermes's notices are machine text: they open with a
+  // bracketed tag ("[Cronjob ...", "[SYSTEM: ...") or carry its INTERNAL
+  // NOTIFICATION footer. A picture-only message opening with the gateway's
+  // picture line is still the person's.
+  const NOTICE_FOOTER = "[INTERNAL NOTIFICATION";
+  const PICTURE_LINE = /^\[(Image attached at:|screenshot\])/;
+  function typedUser(row) {
+    if (!row || typeof row !== "object" || row.role !== "user") return false;
+    if (!row.display_kind) return true;
+    if (row.display_kind !== "internal_notification") return false;
+    const text = rowText(row.content).trim();
+    if (!text || text.includes(NOTICE_FOOTER)) return false;
+    return text[0] !== "[" || PICTURE_LINE.test(text);
+  }
+
   // A user row's words without its picture lines: the gateway saves a picture
   // as "[Image attached at: <path>]" plus "[screenshot]", the phone as @image:.
   function coreText(text) {
@@ -345,7 +364,7 @@
     const floor = Number(sent && sent.afterRowId) || 0;
     const want = coreText(sent && sent.text);
     const fresh = list.filter((r) => Number(r.id) > floor);
-    const isUser = (r) => r.role === "user" && !r.display_kind;
+    const isUser = typedUser;
     const said = (r) => r.role === "assistant" && rowText(r.content).trim() !== "";
     let at = fresh.findIndex((r) => isUser(r) && coreText(rowText(r.content)) === want);
     if (at < 0) at = fresh.findIndex(isUser);
@@ -481,7 +500,7 @@
     return list.map((row, i) => {
       const key = dayKey(messageMs(row));
       if (!key) return null;
-      const mineRow = Boolean(row) && row.role === "user" && !row.display_kind;
+      const mineRow = typedUser(row);
       if (i !== 0 && !mineRow) return null;
       const open = key !== running && !seen.has(key);
       running = key;
@@ -578,7 +597,7 @@
     };
     list.forEach((row, i) => {
       if (!row || typeof row !== "object") return;
-      if (row.role === "user" && !row.display_kind) {
+      if (typedUser(row)) {
         close(false);
         if (messageMs(row) !== null) out[i] = "user";
       } else if (row.role === "assistant" && messageMs(row) !== null) {
@@ -685,7 +704,7 @@
     HELD_TONES, dropWaiting, heldAge, toneTag,
     latestTodos, planVisible, planState, waitedOnId, stepName, segLook, rowHalt,
     QUICK_REACTIONS, applyReaction, mine, tapDetector, searchRows,
-    gatewayRoute, coreText, gatewayProgress, gatewayStep,
+    typedUser, gatewayRoute, coreText, gatewayProgress, gatewayStep,
     QUICK_ANSWERS, quickReplies
   };
 })(typeof window !== "undefined" ? window : globalThis);

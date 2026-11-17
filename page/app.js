@@ -2628,10 +2628,12 @@ function runningHere() {
   return Boolean(liveRun(state.sessionId));
 }
 
-// A user row with any display_kind came from Hermes, not the person typing:
-// guidance (steer), model-switch notices, background-process reports.
+// A user row with a display_kind came from Hermes, not the person typing:
+// guidance (steer), model-switch notices, background-process reports. Except
+// that Hermes v0.23 also tags messages sent from this page as notices;
+// PhoneParts.typedUser tells those apart.
 function realUser(message) {
-  return Boolean(message) && message.role === "user" && !message.display_kind;
+  return PhoneParts.typedUser(message);
 }
 
 function steerText(content) {
@@ -2700,7 +2702,10 @@ function callsShown(messages) {
 }
 
 // "N files changed" for one turn: every landed edit with a diff, one row per
-// file, +/- summed. Mirrors the desktop card (changed-files.ts).
+// file, +/- summed. Mirrors the desktop card (changed-files.ts) and where the
+// desktop shows it (SettledChangedFiles in assistant-message.tsx): only under
+// the latest turn, only once that turn has finished. While the agent is
+// still editing, the step rows show each change; the next message retires it.
 const turnCards = new Map();
 
 function editsOf(message, results) {
@@ -2934,15 +2939,12 @@ function renderTranscript(opts) {
   let turnKey = "start";
   let edits = [];
   const shownRows = [];
-  const flush = () => {
-    if (edits.length) wanted.push(changedFilesCard(turnKey, edits));
-    edits = [];
-  };
+  const running = Boolean(liveRun(state.sessionId)) || Boolean(OTHER.busy);
   for (const message of state.messages) {
     if (!message || message.display_kind === "hidden") continue;
     if (message.role === "system") continue;
     if (realUser(message)) {
-      flush();
+      edits = [];
       turnKey = "u" + message.id;
     }
     // A result whose call is on screen is drawn inside that call's row.
@@ -2954,7 +2956,7 @@ function renderTranscript(opts) {
     wanted.push(node);
     shown += 1;
   }
-  flush();
+  if (edits.length && !running) wanted.push(changedFilesCard(turnKey, edits));
   // Date dividers (S56): one above the first message of each local day.
   // Message times: one under each message you sent and each finished
   // reply. Spliced from the end, the time before the divider, so earlier
@@ -3590,7 +3592,7 @@ function renderHistoryMessage(message, results) {
       return steer.trim() ? userBubble(steer, true, undefined, rowClampKey(message)) : null;
     }
     if (!text) return null;
-    if (message.display_kind) {
+    if (!realUser(message)) {
       const note = document.createElement("div");
       note.className = "note";
       note.textContent = text.replace(/^\[System:\s*/, "").replace(/\]$/, "");
